@@ -1,0 +1,7 @@
+flask
+typer
+requests
+python-dotenv
+pdfminer.six
+python-docx
+uv
