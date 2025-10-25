@@ -1,0 +1,12 @@
+{% extends 'layout.html' %}
+{% block content %}
+<h3>Upload Answer Key</h3>
+<form method="post" enctype="multipart/form-data">
+  <div class="mb-3">
+    <input class="form-control" type="file" name="file" accept="*/*" required />
+  </div>
+  <button class="btn btn-primary">Upload</button>
+  <a class="btn btn-secondary" href="/">Back</a>
+{% if message %}<div class="alert alert-success mt-3">{{ message }}</div>{% endif %}
+</form>
+{% endblock %}

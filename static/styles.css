@@ -1,0 +1,79 @@
+:root{
+  --brand-blue:#1156AA; /* dark blue */
+  --brand-blue-dark:#0D4587; /* darker blue */
+  --brand-green:#63C66B; /* green */
+  --brand-green-dark:#3D9840; /* darker green */
+  --brand-lime:#8BDF46; /* light green */
+  --brand-teal:#39B596; /* greenish blue */
+  --brand-turq:#1A92B1; /* turquoise */
+}
+
+@keyframes spin-gear {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+html,body {height:100%;}
+body {
+  background: linear-gradient(180deg, #f8fbff 0%, #f6fff9 100%);
+  font-family: 'Montserrat', system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color: #1b263b;
+}
+.fancy-navbar{
+  background: linear-gradient(90deg, #1f1f1f, #2b2b2b);
+}
+.navbar .nav-link{ color:#e0e0e0; opacity:.85; }
+.navbar .nav-link:hover, .navbar .nav-link.active{ color:#ffffff; opacity:1; text-shadow:0 1px 0 rgba(0,0,0,0.25); }
+.navbar-brand span{ font-weight:700; letter-spacing:.2px; }
+
+.menu-trigger{
+  display:inline-flex;
+  flex-direction:column;
+  justify-content:space-between;
+  width:26px;
+  height:20px;
+  text-decoration:none;
+}
+.menu-trigger span{
+  display:block;
+  height:3px;
+  border-radius:3px;
+  background: var(--brand-lime);
+  transition: background .2s ease;
+}
+.menu-trigger:hover span{ background: var(--brand-green); }
+
+.settings-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  color: var(--brand-lime);
+  transition: color .2s ease;
+  margin-left: auto;
+  padding: 0.5rem;
+}
+.settings-icon:hover {
+  color: var(--brand-green);
+  animation: spin-gear 0.6s ease-in-out;
+}
+.settings-icon svg {
+  stroke: currentColor;
+  transition: transform .2s ease;
+}
+
+.card { box-shadow: 0 6px 20px rgba(17,86,170,0.08); border:0; border-radius: 14px; }
+.card .card-body{ padding: 1.1rem 1.25rem; }
+
+.btn-primary{ background: var(--brand-green); border-color: var(--brand-green-dark); }
+.btn-primary:hover{ background: var(--brand-green-dark); border-color: var(--brand-green-dark); }
+.btn-outline-secondary{ color: var(--brand-blue-dark); border-color: var(--brand-blue); }
+.btn-outline-secondary:hover{ background: var(--brand-blue); color:#fff; }
+
+table.table tr th, table.table tr td { vertical-align: middle; }
+.table thead th{ color:#133e7c; }
+
+.app-logo { height: 28px; width: auto; filter: drop-shadow(0 0 2px rgba(0,0,0,0.25)); }
+
+/* Chart.js canvas tweaks */
+canvas { background: #fff; border-radius: 10px; }

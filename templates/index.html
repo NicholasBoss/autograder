@@ -1,0 +1,47 @@
+{% extends 'layout.html' %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center">
+  <h3>Dashboard</h3>
+  <button class="btn btn-outline-secondary" id="btnRefresh">Refresh</button>
+  <script>document.getElementById('btnRefresh').onclick=()=>fetch('/api/refresh').then(()=>location.reload());</script>
+  </div>
+<div class="row g-3 mt-1">
+  <div class="col-md-4">
+    <div class="card"><div class="card-body">
+      <div class="h6">Assignments</div>
+      <div id="assignCount" class="display-6">0</div>
+    </div></div>
+  </div>
+  <div class="col-md-4">
+    <div class="card"><div class="card-body">
+      <div class="h6">Avg Score</div>
+      <div id="avgScore" class="display-6">-</div>
+    </div></div>
+  </div>
+  <div class="col-md-4">
+    <div class="card"><div class="card-body">
+      <div class="h6"># Submissions</div>
+      <div id="subCount" class="display-6">0</div>
+    </div></div>
+  </div>
+</div>
+
+<div class="card mt-4"><div class="card-body">
+  <canvas id="assignBar" height="100"></canvas>
+</div></div>
+
+<script>
+async function load() {
+  const assigns = await (await fetch('/api/stats/assignments')).json();
+  document.getElementById('assignCount').innerText = assigns.length;
+  const all = await (await fetch('/api/refresh')).json();
+  document.getElementById('subCount').innerText = all.manifest;
+  const avgs = assigns.map(a => a.avg).filter(x => typeof x==='number');
+  const overall = avgs.length? (avgs.reduce((a,b)=>a+b,0)/avgs.length).toFixed(2) : '-';
+  document.getElementById('avgScore').innerText = overall;
+  new Chart(document.getElementById('assignBar'), {type:'bar', data:{labels:assigns.map(a=>a.assignment_id), datasets:[{label:'Average', data:assigns.map(a=>a.avg||0)}]}});
+}
+load();
+</script>
+{% endblock %}
+
