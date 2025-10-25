@@ -1,115 +1,6 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Canvas Submissions Feedback</title>
-    <style>
-        body {
-            font-family: sans-serif;
-            margin: 2em;
-            background-color: #f5f5f5;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background: white;
-            padding: 2em;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        .form-group {
-            margin-bottom: 1.5em;
-        }
-        label {
-            display: block;
-            font-weight: bold;
-            margin-bottom: 0.5em;
-            color: #333;
-        }
-        select, input[type="text"] {
-            width: 100%;
-            max-width: 400px;
-            padding: 0.75em;
-            border: 2px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-        }
-        select:focus, input:focus {
-            outline: none;
-            border-color: #007bff;
-        }
-        select:disabled, input:disabled {
-            background-color: #f8f9fa;
-            color: #6c757d;
-        }
-        .loading {
-            color: #6c757d;
-            font-style: italic;
-        }
-        .error {
-            color: #dc3545;
-            font-weight: bold;
-        }
-        .success {
-            color: #28a745;
-            font-weight: bold;
-        }
-        .btn {
-            background-color: #007bff;
-            color: white;
-            border: none;
-            padding: 0.75em 1.5em;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: bold;
-        }
-        .btn:hover {
-            background-color: #0056b3;
-        }
-        .btn:disabled {
-            background-color: #6c757d;
-            cursor: not-allowed;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 2em;
-        }
-        th, td {
-            border: 1px solid #ddd;
-            padding: 0.75em;
-            text-align: left;
-        }
-        th {
-            background-color: #f8f9fa;
-            font-weight: bold;
-        }
-        .status-message {
-            margin: 1em 0;
-            padding: 0.75em;
-            border-radius: 4px;
-        }
-        .manual-entry {
-            margin-top: 1em;
-            padding: 1em;
-            background-color: #f8f9fa;
-            border-radius: 4px;
-            border: 1px solid #dee2e6;
-        }
-        .manual-entry h3 {
-            margin-top: 0;
-            color: #495057;
-        }
-        .row {
-            display: flex;
-            gap: 2em;
-            align-items: end;
-        }
-        .col {
-            flex: 1;
-        }
-    </style>
+{% extends "layout.html" %}
+
+{% block content %}
     <script>
         let assignments = [];
         
@@ -312,42 +203,42 @@
     </script>
 </head>
 <body>
-    <div class="container">
+    <div class="submissions-manager">
         <h1>Canvas Submissions Manager</h1>
         
         <div id="status"></div>
         
-        <div class="row">
-            <div class="col">
-                <label for="course_id">Course ID:</label>
-                <input type="text" id="course_id" placeholder="e.g. 12345" onchange="onCourseIdChange()">
+        <div class="submission-form">
+            <div class="form-group">
+                <label for="course_id" class="form-label">Course ID:</label>
+                <input type="text" id="course_id" class="form-control" placeholder="e.g. 12345" onchange="onCourseIdChange()">
             </div>
-            <div class="col">
-                <label for="assignment_select">Select Assignment:</label>
-                <div style="margin-bottom: 0.5em;">
+            
+            <div class="form-group">
+                <label for="assignment_select" class="form-label">Select Assignment:</label>
+                <div class="checkbox-container">
                     <input type="checkbox" id="file_uploads_only" checked onchange="onFilterChange()">
-                    <label for="file_uploads_only" style="display: inline; font-weight: normal; margin-left: 0.5em;">Show only file upload assignments</label>
+                    <label for="file_uploads_only" class="checkbox-label">Show only file upload assignments</label>
                 </div>
-                <select id="assignment_select" onchange="onAssignmentChange()" disabled>
+                <select id="assignment_select" class="form-control" onchange="onAssignmentChange()" disabled>
                     <option value="">Enter Course ID first</option>
                 </select>
             </div>
-            <div class="col">
-                <button id="submit_btn" class="btn" onclick="fetchSubmissions()">Fetch Submissions</button>
+            
+            <div class="form-group">
+                <button id="submit_btn" class="fetch-btn" onclick="fetchSubmissions()">Fetch Submissions</button>
             </div>
         </div>
         
         <div class="manual-entry">
             <h3>Manual Assignment ID Entry:</h3>
-            <div class="row">
-                <div class="col">
-                    <label for="assignment_id">Assignment ID:</label>
-                    <input type="text" id="assignment_id" placeholder="e.g. 67890" onchange="syncAssignmentInput()">
-                </div>
+            <div class="form-group">
+                <label for="assignment_id" class="form-label">Assignment ID:</label>
+                <input type="text" id="assignment_id" class="form-control" placeholder="e.g. 67890" onchange="syncAssignmentInput()">
             </div>
         </div>
 
-        <table style="margin-top: 2em;">
+        <table class="submissions-table">
             <thead>
                 <tr>
                     <th>#</th>
@@ -362,5 +253,4 @@
             <tbody id="results"></tbody>
         </table>
     </div>
-</body>
-</html>
+{% endblock %}
