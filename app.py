@@ -9,7 +9,8 @@ from dotenv import load_dotenv, set_key, dotenv_values
 from pathlib import Path
 import requests
 import typer
-from grading import run_grading
+from grading import grade_assignments
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 APP = Flask(__name__, template_folder="templates", static_folder="static")
 APP.secret_key = os.getenv("FLASK_SECRET", "dev_secret_key_change_me")
@@ -24,8 +25,6 @@ DEFAULTS = {
     "RESULTS_FILE": "results.jsonl",
     "ANSWER_KEY_FILE": "answer_key.json",
     "CANVAS_DOWNLOAD_DIR": "./data/downloads",
-    "OLLAMA_HOST": "http://localhost:11434",
-    "OLLAMA_MODEL": "llama3.1",
     "OPENROUTER_MODEL": "meta-llama/llama-3.1-8b-instruct:free"
 }
 
@@ -89,7 +88,7 @@ def setup():
         fields = [
             "CANVAS_API_URL", "CANVAS_API_TOKEN", "CANVAS_COURSE_ID", "CANVAS_ASSIGNMENT_ID",
             "DATA_DIR", "MANIFEST_FILE", "RESULTS_FILE", "ANSWER_KEY_FILE", "CANVAS_DOWNLOAD_DIR",
-            "OLLAMA_HOST", "OLLAMA_MODEL", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"
+            "OPENROUTER_API_KEY", "OPENROUTER_MODEL"
         ]
         # write to .env
         for f in fields:
@@ -317,6 +316,91 @@ def get_canvas_assignments(course_id: str = None, file_uploads_only: bool = Fals
         return []
 
 
+def get_parsed_questions_content_with_course(course_id: str, assignment_id: str) -> str:
+    """Get the parsed questions content for a specific course and assignment (markdown format)."""
+    cfg = load_env()
+    base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+    
+    # Look for parsed questions in course-specific assignment folder
+    if course_id == "unknown":
+        # Handle legacy assignment folders
+        assignment_dir = base_download_dir / f"assignment_{assignment_id}"
+    else:
+        # Handle course-specific folders
+        course_dir = base_download_dir / f"course_{course_id}"
+        assignment_dir = course_dir / f"assignment_{assignment_id}"
+    
+    questions_dir = assignment_dir / "questions"
+    
+    if not questions_dir.exists():
+        print(f"No questions directory found for course {course_id}, assignment {assignment_id}")
+        return None
+    
+    # Get all markdown files in the questions directory
+    questions_files = [f for f in questions_dir.iterdir() if f.is_file() and f.suffix == '.md']
+    
+    if not questions_files:
+        print(f"No parsed questions files found for course {course_id}, assignment {assignment_id}")
+        return None
+    
+    # Use the most recently modified file as the parsed questions
+    questions_file = max(questions_files, key=lambda f: f.stat().st_mtime)
+    
+    try:
+        with open(questions_file, 'r', encoding='utf-8') as f:
+            return f.read()
+    except UnicodeDecodeError:
+        # Try reading as binary and decode
+        try:
+            with open(questions_file, 'rb') as f:
+                content = f.read()
+                return content.decode('utf-8', errors='ignore')
+        except Exception as e:
+            print(f"Error reading parsed questions as binary: {e}")
+            return None
+    except Exception as e:
+        print(f"Error reading parsed questions: {e}")
+        return None
+
+def get_parsed_questions_content(assignment_id: str) -> str:
+    """Get the parsed questions content for a specific assignment (markdown format) - legacy support."""
+    cfg = load_env()
+    base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+    
+    # Look for parsed questions in assignment-specific folder
+    assignment_dir = base_download_dir / f"assignment_{assignment_id}"
+    questions_dir = assignment_dir / "questions"
+    
+    if not questions_dir.exists():
+        print(f"No questions directory found for assignment {assignment_id}")
+        return None
+    
+    # Get all markdown files in the questions directory
+    questions_files = [f for f in questions_dir.iterdir() if f.is_file() and f.suffix == '.md']
+    
+    if not questions_files:
+        print(f"No parsed questions files found for assignment {assignment_id}")
+        return None
+    
+    # Use the most recently modified file as the parsed questions
+    questions_file = max(questions_files, key=lambda f: f.stat().st_mtime)
+    
+    try:
+        with open(questions_file, 'r', encoding='utf-8') as f:
+            return f.read()
+    except UnicodeDecodeError:
+        # Try reading as binary and decode
+        try:
+            with open(questions_file, 'rb') as f:
+                content = f.read()
+                return content.decode('utf-8', errors='ignore')
+        except Exception as e:
+            print(f"Error reading parsed questions as binary: {e}")
+            return None
+    except Exception as e:
+        print(f"Error reading parsed questions: {e}")
+        return None
+
 def get_answer_key_content(assignment_id: str) -> str:
     """Get the answer key content for a specific assignment."""
     cfg = load_env()
@@ -411,13 +495,18 @@ def fetch_submissions():
     base_url = f"{cfg.get('CANVAS_API_URL').rstrip('/')}/api/v1/courses/{course_id}/assignments/{assignment_id}/submissions"
     headers = {"Authorization": f"Bearer {cfg.get('CANVAS_API_TOKEN')}"}
     
-    # Set up directories with assignment-specific folder
+    # Set up directories with course and assignment-specific folders
     base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
-    download_dir = base_download_dir / f"assignment_{assignment_id}"
+    course_dir = base_download_dir / f"course_{course_id}"
+    download_dir = course_dir / f"assignment_{assignment_id}"
+    answer_key_dir = download_dir / "answer_key"
+    questions_dir = download_dir / "questions"
     data_dir = Path(cfg.get("DATA_DIR", "./data"))
-    manifest_path = data_dir / f"submissions_manifest_assignment_{assignment_id}.jsonl"
+    manifest_path = data_dir / f"submissions_manifest_course_{course_id}_assignment_{assignment_id}.jsonl"
     
     download_dir.mkdir(parents=True, exist_ok=True)
+    answer_key_dir.mkdir(parents=True, exist_ok=True)
+    questions_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
 
     params = {
@@ -431,7 +520,9 @@ def fetch_submissions():
     
     try:
         print(f"📂 Creating assignment folder: {download_dir}")
-        print(f"📄 Manifest will be saved as: {manifest_path.name}")
+        print(f"� Creating answer_key folder: {answer_key_dir}")
+        print(f"📁 Creating questions folder: {questions_dir}")
+        print(f"�📄 Manifest will be saved as: {manifest_path.name}")
         
         # Fetch all submissions with pagination
         while current_url:
@@ -822,25 +913,29 @@ def upload_answer_key():
     
     if request.method == "POST":
         uploaded_file = request.files.get("answer_key_file")
-        # Check both dropdown selection and manual input
+        # Get course and assignment IDs
+        course_id = request.form.get("course_id", "").strip()
         assignment_id = request.form.get("assignment_id", "").strip()
-        manual_assignment_id = request.form.get("assignment_id_manual", "").strip()
-        
-        # Use manual input if provided, otherwise use dropdown selection
-        final_assignment_id = manual_assignment_id if manual_assignment_id else assignment_id
         
         if not uploaded_file or uploaded_file.filename == '':
             flash("No file selected for upload", "danger")
             return redirect(url_for("upload_answer_key"))
         
-        if not final_assignment_id:
+        if not assignment_id:
             flash("Assignment ID is required", "danger")
             return redirect(url_for("upload_answer_key"))
         
-        # Create assignment-specific answer key directory
-        assignment_dir = base_download_dir / f"assignment_{final_assignment_id}"
+        if not course_id:
+            flash("Course ID is required", "danger")
+            return redirect(url_for("upload_answer_key"))
+        
+        # Create course and assignment-specific answer key directory and questions directory
+        course_dir = base_download_dir / f"course_{course_id}"
+        assignment_dir = course_dir / f"assignment_{assignment_id}"
         answer_key_dir = assignment_dir / "answer_key"
+        questions_dir = assignment_dir / "questions"
         answer_key_dir.mkdir(parents=True, exist_ok=True)
+        questions_dir.mkdir(parents=True, exist_ok=True)
         
         # Use the original filename directly
         original_filename = uploaded_file.filename
@@ -854,7 +949,7 @@ def upload_answer_key():
             with open(key_file, "wb") as fo:
                 fo.write(uploaded_file.read())
             
-            flash(f"Answer key successfully uploaded for Assignment {final_assignment_id} as {safe_filename}", "success")
+            flash(f"Answer key successfully uploaded for Course {course_id}, Assignment {assignment_id} as {safe_filename}", "success")
             print(f"✅ Answer key saved to: {key_file}")
             
             return redirect(url_for("index"))
@@ -872,6 +967,41 @@ def upload_answer_key():
     
     try:
         if base_download_dir.exists():
+            # Scan course-based folder structure
+            for course_folder in base_download_dir.iterdir():
+                if course_folder.is_dir() and course_folder.name.startswith("course_"):
+                    course_id = course_folder.name.replace("course_", "")
+                    
+                    for assignment_folder in course_folder.iterdir():
+                        if assignment_folder.is_dir() and assignment_folder.name.startswith("assignment_"):
+                            assignment_id = assignment_folder.name.replace("assignment_", "")
+                            answer_key_dir = assignment_folder / "answer_key"
+                            
+                            if answer_key_dir.exists():
+                                for key_file in answer_key_dir.iterdir():
+                                    if key_file.is_file():
+                                        try:
+                                            stat = key_file.stat()
+                                            
+                                            # Check if questions have been parsed for this answer key
+                                            questions_dir = assignment_folder / "questions"
+                                            parsed_questions_file = questions_dir / f"parsed_questions_{key_file.name}.md"
+                                            has_parsed_questions = parsed_questions_file.exists()
+                                            
+                                            existing_answer_keys.append({
+                                                "course_id": course_id,
+                                                "assignment_id": assignment_id,
+                                                "filename": key_file.name,
+                                                "size": stat.st_size,
+                                                "modified": time.ctime(stat.st_mtime),
+                                                "path": str(key_file),
+                                                "has_parsed_questions": has_parsed_questions,
+                                                "parsed_questions_path": str(parsed_questions_file) if has_parsed_questions else None
+                                            })
+                                        except Exception as e:
+                                            print(f"Error reading answer key file {key_file}: {e}")
+            
+            # Also scan legacy assignment folders (without course prefix) for backward compatibility
             for assignment_folder in base_download_dir.iterdir():
                 if assignment_folder.is_dir() and assignment_folder.name.startswith("assignment_"):
                     assignment_id = assignment_folder.name.replace("assignment_", "")
@@ -882,12 +1012,22 @@ def upload_answer_key():
                             if key_file.is_file():
                                 try:
                                     stat = key_file.stat()
+                                    
+                                    # Check if questions have been parsed for this answer key
+                                    questions_dir = assignment_folder / "questions"
+                                    parsed_questions_file = questions_dir / f"parsed_questions_{key_file.name}.md"
+                                    has_parsed_questions = parsed_questions_file.exists()
+                                    
                                     existing_answer_keys.append({
+                                        "course_id": "unknown",
                                         "assignment_id": assignment_id,
                                         "filename": key_file.name,
                                         "size": stat.st_size,
                                         "modified": time.ctime(stat.st_mtime),
-                                        "path": str(key_file)
+                                        "path": str(key_file),
+                                        "has_parsed_questions": has_parsed_questions,
+                                        "parsed_questions_path": str(parsed_questions_file) if has_parsed_questions else None,
+                                        "legacy": True
                                     })
                                 except Exception as e:
                                     print(f"Error reading answer key file {key_file}: {e}")
@@ -901,6 +1041,220 @@ def upload_answer_key():
     assignments = get_canvas_assignments()
     
     return render_template("upload_answer_key.html", existing_answer_keys=existing_answer_keys, assignments=assignments)
+
+@APP.route("/api/parse-questions/<assignment_id>/<filename>", methods=["POST"])
+def parse_questions_with_openrouter(assignment_id, filename):
+    """Parse questions from answer key using OpenRouter API."""
+    cfg = load_env()
+    base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+    
+    # Construct paths
+    assignment_dir = base_download_dir / f"assignment_{assignment_id}"
+    answer_key_dir = assignment_dir / "answer_key"
+    questions_dir = assignment_dir / "questions"
+    key_file = answer_key_dir / filename
+    
+    if not key_file.exists():
+        return jsonify({"error": "Answer key file not found"}), 404
+    
+    # Create questions directory if it doesn't exist
+    questions_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Read the answer key content
+        with open(key_file, 'r', encoding='utf-8') as f:
+            answer_key_content = f.read()
+    except UnicodeDecodeError:
+        # Try reading as binary and decode
+        try:
+            with open(key_file, 'rb') as f:
+                content = f.read()
+                answer_key_content = content.decode('utf-8', errors='ignore')
+        except Exception as e:
+            return jsonify({"error": f"Error reading answer key file: {str(e)}"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Error reading answer key file: {str(e)}"}), 500
+    
+    # Create prompt for OpenRouter to return markdown format
+    prompt = f"""Please analyze the following answer key content and extract individual questions with their answers. 
+
+Format the output as clean markdown with numbered questions. Each question should be clearly separated with proper markdown formatting.
+
+Answer Key Content:
+{answer_key_content}
+
+Please format your response as markdown:
+
+## Question 1
+**Question:** [Question text here]
+
+**Answer:** [Complete answer here]
+
+## Question 2
+**Question:** [Question text here]
+
+**Answer:** [Complete answer here]
+
+Continue this pattern for all questions found. Use proper markdown formatting with headers, bold text, and clear separation between questions."""
+
+    # Call OpenRouter API
+    openrouter_api_key = cfg.get("OPENROUTER_API_KEY")
+    openrouter_model = cfg.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+    
+    if not openrouter_api_key:
+        return jsonify({"error": "OpenRouter API key not configured"}), 400
+    
+    try:
+        payload = {
+            "model": openrouter_model,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {openrouter_api_key}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=60
+        )
+        
+        if response.status_code != 200:
+            return jsonify({"error": f"OpenRouter API error: {response.text}"}), response.status_code
+        
+        parsed_questions = response.json()["choices"][0]["message"]["content"]
+        
+        # Save parsed questions to markdown file
+        questions_filename = f"parsed_questions_{filename}.md"
+        questions_file = questions_dir / questions_filename
+        
+        with open(questions_file, 'w', encoding='utf-8') as f:
+            f.write(f"# Parsed Questions\n\n")
+            f.write(f"**Source:** {filename}  \n")
+            f.write(f"**Assignment ID:** {assignment_id}  \n")
+            f.write(f"**Parsed on:** {time.strftime('%Y-%m-%d %H:%M:%S')}  \n\n")
+            f.write("---\n\n")
+            f.write(parsed_questions)
+        
+        return jsonify({
+            "success": True,
+            "message": f"Questions parsed and saved to {questions_filename}",
+            "questions_file": str(questions_file),
+            "parsed_content": parsed_questions
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Error parsing questions: {str(e)}"}), 500
+
+@APP.route("/api/parse-questions/<course_id>/<assignment_id>/<filename>", methods=["POST"])
+def parse_questions_with_openrouter_course(course_id, assignment_id, filename):
+    """Parse questions from answer key using OpenRouter API with course structure."""
+    cfg = load_env()
+    base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+    
+    # Construct paths for course structure
+    course_dir = base_download_dir / f"course_{course_id}"
+    assignment_dir = course_dir / f"assignment_{assignment_id}"
+    answer_key_dir = assignment_dir / "answer_key"
+    questions_dir = assignment_dir / "questions"
+    key_file = answer_key_dir / filename
+    
+    if not key_file.exists():
+        return jsonify({"error": "Answer key file not found"}), 404
+    
+    # Create questions directory if it doesn't exist
+    questions_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        # Read the answer key content
+        with open(key_file, 'r', encoding='utf-8') as f:
+            answer_key_content = f.read()
+    except UnicodeDecodeError:
+        # Try reading as binary and decode
+        try:
+            with open(key_file, 'rb') as f:
+                content = f.read()
+                answer_key_content = content.decode('utf-8', errors='ignore')
+        except Exception as e:
+            return jsonify({"error": f"Error reading answer key file: {str(e)}"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Error reading answer key file: {str(e)}"}), 500
+    
+    # Create prompt for OpenRouter to return markdown format
+    prompt = f"""Please analyze the following answer key content and extract individual questions with their answers. 
+
+Format the output as clean markdown with numbered questions. Each question should be clearly separated with proper markdown formatting.
+
+Answer Key Content:
+{answer_key_content}
+
+Please format your response as markdown:
+
+## Question 1
+**Question:** [Question text here]
+
+**Answer:** [Complete answer here]
+
+## Question 2
+**Question:** [Question text here]
+
+**Answer:** [Complete answer here]
+
+Continue this pattern for all questions found. Use proper markdown formatting with headers, bold text, and clear separation between questions."""
+
+    # Call OpenRouter API
+    openrouter_api_key = cfg.get("OPENROUTER_API_KEY")
+    openrouter_model = cfg.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+    
+    if not openrouter_api_key:
+        return jsonify({"error": "OpenRouter API key not configured"}), 400
+    
+    try:
+        payload = {
+            "model": openrouter_model,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {openrouter_api_key}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=60
+        )
+        
+        if response.status_code != 200:
+            return jsonify({"error": f"OpenRouter API error: {response.text}"}), response.status_code
+        
+        parsed_questions = response.json()["choices"][0]["message"]["content"]
+        
+        # Save parsed questions to markdown file
+        questions_filename = f"parsed_questions_{filename}.md"
+        questions_file = questions_dir / questions_filename
+        
+        with open(questions_file, 'w', encoding='utf-8') as f:
+            f.write(f"# Parsed Questions\n\n")
+            f.write(f"**Source:** {filename}  \n")
+            f.write(f"**Course ID:** {course_id}  \n")
+            f.write(f"**Assignment ID:** {assignment_id}  \n")
+            f.write(f"**Parsed on:** {time.strftime('%Y-%m-%d %H:%M:%S')}  \n\n")
+            f.write("---\n\n")
+            f.write(parsed_questions)
+        
+        return jsonify({
+            "success": True,
+            "message": f"Questions parsed and saved to {questions_filename}",
+            "course_id": course_id,
+            "assignment_id": assignment_id,
+            "questions_file": str(questions_file),
+            "parsed_content": parsed_questions
+        })
+        
+    except Exception as e:
+        return jsonify({"error": f"Error parsing questions: {str(e)}"}), 500
 
 @APP.route("/download/answer-key/<assignment_id>/<filename>")
 def download_answer_key(assignment_id, filename):
@@ -927,6 +1281,205 @@ def download_answer_key(assignment_id, filename):
         )
     except Exception as e:
         flash(f"Error downloading file: {str(e)}", "danger")
+        return redirect(url_for("upload_answer_key"))
+
+@APP.route("/download/answer-key/<course_id>/<assignment_id>/<filename>")
+def download_answer_key_with_course(course_id, assignment_id, filename):
+    """Download a specific answer key file with course structure."""
+    cfg = load_env()
+    base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+    
+    # Construct path to answer key file in course structure
+    course_dir = base_download_dir / f"course_{course_id}"
+    assignment_dir = course_dir / f"assignment_{assignment_id}"
+    answer_key_dir = assignment_dir / "answer_key"
+    key_file = answer_key_dir / filename
+    
+    if not key_file.exists():
+        flash("Answer key file not found", "danger")
+        return redirect(url_for("upload_answer_key"))
+    
+    try:
+        file_ext = key_file.suffix or ".txt"
+        return send_from_directory(
+            directory=str(answer_key_dir),
+            path=filename,
+            as_attachment=True,
+            download_name=f"answer_key_course_{course_id}_assignment_{assignment_id}_{time.strftime('%Y%m%d_%H%M%S')}{file_ext}"
+        )
+    except Exception as e:
+        flash(f"Error downloading file: {str(e)}", "danger")
+        return redirect(url_for("upload_answer_key"))
+
+@APP.route("/api/available-courses", methods=["GET"])
+def api_get_available_courses():
+    """Get list of courses that have assignments with data."""
+    try:
+        cfg = load_env()
+        base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+        courses = []
+        
+        if base_download_dir.exists():
+            for course_folder in base_download_dir.iterdir():
+                if course_folder.is_dir() and course_folder.name.startswith("course_"):
+                    course_id = course_folder.name.replace("course_", "")
+                    
+                    # Count assignments in this course
+                    assignment_count = 0
+                    for item in course_folder.iterdir():
+                        if item.is_dir() and item.name.startswith("assignment_"):
+                            assignment_count += 1
+                    
+                    if assignment_count > 0:
+                        courses.append({
+                            "course_id": course_id,
+                            "assignment_count": assignment_count
+                        })
+        
+        # Also check for legacy assignment folders (without course prefix)
+        for assignment_folder in base_download_dir.iterdir():
+            if assignment_folder.is_dir() and assignment_folder.name.startswith("assignment_"):
+                assignment_id = assignment_folder.name.replace("assignment_", "")
+                # Add as "Unknown Course" if not already in a course folder
+                courses.append({
+                    "course_id": "unknown",
+                    "assignment_count": 1,
+                    "legacy": True,
+                    "assignment_id": assignment_id
+                })
+        
+        return jsonify({"courses": courses})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@APP.route("/api/course-assignments-with-questions/<course_id>", methods=["GET"])
+def api_get_course_assignments_with_questions(course_id):
+    """Get assignments with parsed questions for a specific course."""
+    try:
+        cfg = load_env()
+        base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+        assignments = []
+        
+        if course_id == "unknown":
+            # Handle legacy assignment folders
+            for assignment_folder in base_download_dir.iterdir():
+                if assignment_folder.is_dir() and assignment_folder.name.startswith("assignment_"):
+                    assignment_id = assignment_folder.name.replace("assignment_", "")
+                    questions_dir = assignment_folder / "questions"
+                    has_questions = questions_dir.exists() and any(f.suffix == '.md' for f in questions_dir.iterdir() if f.is_file())
+                    
+                    assignments.append({
+                        "assignment_id": assignment_id,
+                        "has_questions": has_questions,
+                        "legacy": True
+                    })
+        else:
+            # Handle course-specific folders
+            course_dir = base_download_dir / f"course_{course_id}"
+            if course_dir.exists():
+                for assignment_folder in course_dir.iterdir():
+                    if assignment_folder.is_dir() and assignment_folder.name.startswith("assignment_"):
+                        assignment_id = assignment_folder.name.replace("assignment_", "")
+                        questions_dir = assignment_folder / "questions"
+                        has_questions = questions_dir.exists() and any(f.suffix == '.md' for f in questions_dir.iterdir() if f.is_file())
+                        
+                        assignments.append({
+                            "assignment_id": assignment_id,
+                            "has_questions": has_questions
+                        })
+        
+        return jsonify({"assignments": assignments})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@APP.route("/api/parsed-questions/<course_id>/<assignment_id>", methods=["GET"])
+def api_get_parsed_questions_with_course(course_id, assignment_id):
+    """Get parsed questions content for an assignment (markdown format) with course context."""
+    try:
+        parsed_content = get_parsed_questions_content_with_course(course_id, assignment_id)
+        if not parsed_content:
+            return jsonify({"error": "No parsed questions found for this assignment"}), 404
+        
+        return jsonify({
+            "success": True,
+            "course_id": course_id,
+            "assignment_id": assignment_id,
+            "content": parsed_content,
+            "format": "markdown"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@APP.route("/api/parsed-questions/<assignment_id>", methods=["GET"])
+def api_get_parsed_questions(assignment_id):
+    """Get parsed questions content for an assignment (markdown format) - legacy support."""
+    try:
+        parsed_content = get_parsed_questions_content(assignment_id)
+        if not parsed_content:
+            return jsonify({"error": "No parsed questions found for this assignment"}), 404
+        
+        return jsonify({
+            "success": True,
+            "assignment_id": assignment_id,
+            "content": parsed_content,
+            "format": "markdown"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@APP.route("/download/parsed-questions/<assignment_id>/<filename>")
+def download_parsed_questions(assignment_id, filename):
+    """Download a parsed questions file."""
+    cfg = load_env()
+    base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+    
+    # Construct path to parsed questions file
+    assignment_dir = base_download_dir / f"assignment_{assignment_id}"
+    questions_dir = assignment_dir / "questions"
+    questions_file = questions_dir / filename
+    
+    if not questions_file.exists():
+        flash("Parsed questions file not found", "danger")
+        return redirect(url_for("upload_answer_key"))
+    
+    try:
+        file_ext = ".md" if filename.endswith('.md') else ".txt"
+        return send_from_directory(
+            directory=str(questions_dir),
+            path=filename,
+            as_attachment=True,
+            download_name=f"parsed_questions_assignment_{assignment_id}_{time.strftime('%Y%m%d_%H%M%S')}{file_ext}"
+        )
+    except Exception as e:
+        flash(f"Error downloading parsed questions: {str(e)}", "danger")
+        return redirect(url_for("upload_answer_key"))
+
+@APP.route("/download/parsed-questions/<course_id>/<assignment_id>/<filename>")
+def download_parsed_questions_with_course(course_id, assignment_id, filename):
+    """Download a parsed questions file with course structure."""
+    cfg = load_env()
+    base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+    
+    # Construct path to parsed questions file in course structure
+    course_dir = base_download_dir / f"course_{course_id}"
+    assignment_dir = course_dir / f"assignment_{assignment_id}"
+    questions_dir = assignment_dir / "questions"
+    questions_file = questions_dir / filename
+    
+    if not questions_file.exists():
+        flash("Parsed questions file not found", "danger")
+        return redirect(url_for("upload_answer_key"))
+    
+    try:
+        file_ext = ".md" if filename.endswith('.md') else ".txt"
+        return send_from_directory(
+            directory=str(questions_dir),
+            path=filename,
+            as_attachment=True,
+            download_name=f"parsed_questions_course_{course_id}_assignment_{assignment_id}_{time.strftime('%Y%m%d_%H%M%S')}{file_ext}"
+        )
+    except Exception as e:
+        flash(f"Error downloading parsed questions: {str(e)}", "danger")
         return redirect(url_for("upload_answer_key"))
 
 @APP.route("/api/answer-key-files")
@@ -963,9 +1516,11 @@ def api_answer_key_files():
 
 @APP.route("/api/compare-submissions", methods=["POST"])
 def api_compare_submissions():
-    """Compare student submissions to answer key question by question."""
+    """Compare student submissions to answer key using OpenRouter LLM for intelligent comparison."""
     data = request.get_json()
     assignment_id = data.get("assignment_id")
+    course_id = data.get("course_id")
+    max_workers = data.get("max_workers", 5)  # Allow customization, default to 5 parallel workers
     
     if not assignment_id:
         return jsonify({"error": "assignment_id is required"}), 400
@@ -974,27 +1529,53 @@ def api_compare_submissions():
         cfg = load_env()
         data_dir = Path(cfg.get("DATA_DIR", DEFAULTS["DATA_DIR"]))
         base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
-        assignment_dir = base_download_dir / f"assignment_{assignment_id}"
-        manifest_path = data_dir / f"submissions_manifest_assignment_{assignment_id}.jsonl"
         
-        # Get answer key content
-        answer_key_content = get_answer_key_content(assignment_id)
+        # Determine the correct manifest path based on course_id
+        if course_id and course_id != "unknown":
+            manifest_path = data_dir / f"submissions_manifest_course_{course_id}_assignment_{assignment_id}.jsonl"
+            # Also try the legacy manifest path
+            if not manifest_path.exists():
+                manifest_path = data_dir / f"submissions_manifest_assignment_{assignment_id}.jsonl"
+            assignment_dir = base_download_dir / f"course_{course_id}" / f"assignment_{assignment_id}"
+        else:
+            manifest_path = data_dir / f"submissions_manifest_assignment_{assignment_id}.jsonl"
+            assignment_dir = base_download_dir / f"assignment_{assignment_id}"
+        
+        # Get parsed questions or answer key
+        parsed_questions_content = None
+        if course_id and course_id != "unknown":
+            parsed_questions_content = get_parsed_questions_content_with_course(course_id, assignment_id)
+        
+        if not parsed_questions_content:
+            parsed_questions_content = get_parsed_questions_content(assignment_id)
+        
+        if parsed_questions_content:
+            print(f"✅ Using parsed questions (markdown) for assignment {assignment_id}")
+            answer_key_content = parsed_questions_content
+        else:
+            print(f"⚠️ No parsed questions found, using original answer key for assignment {assignment_id}")
+            answer_key_content = get_answer_key_content(assignment_id)
+            if not answer_key_content:
+                return jsonify({"error": "No answer key or parsed questions found"}), 400
+        
         if not answer_key_content:
-            return jsonify({"error": "No answer key found"}), 400
+            return jsonify({"error": "Could not load answer key or parsed questions"}), 400
         
-        # Parse questions from answer key
-        answer_key_questions = parse_questions_from_text(answer_key_content)
-        if not answer_key_questions:
-            return jsonify({"error": "Could not parse questions from answer key"}), 400
-        
-        print(f"📝 Found {len(answer_key_questions)} questions in answer key")
+        print(f"� Answer key/questions loaded ({len(answer_key_content)} characters)")
         
         # Load student submissions from manifest
         if not manifest_path.exists():
-            return jsonify({"error": f"No submissions manifest found for assignment {assignment_id}"}), 400
+            return jsonify({"error": f"No submissions manifest found for assignment {assignment_id}"}), 404
         
-        comparison_results = []
+        # Get OpenRouter credentials
+        openrouter_api_key = cfg.get("OPENROUTER_API_KEY")
+        openrouter_model = cfg.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
         
+        if not openrouter_api_key:
+            return jsonify({"error": "OpenRouter API key not configured"}), 400
+        
+        # Load all submissions first
+        submissions_to_grade = []
         with open(manifest_path, 'r', encoding='utf-8') as f:
             for line in f:
                 try:
@@ -1019,106 +1600,171 @@ def api_compare_submissions():
                                 except Exception:
                                     continue
                     
-                    if not student_text:
-                        comparison_results.append({
-                            "user_id": user_id,
-                            "user_name": user_name,
-                            "error": "No readable submission content found",
-                            "total_questions": len(answer_key_questions),
-                            "correct_answers": 0,
-                            "score_percentage": 0.0,
-                            "question_results": []
-                        })
-                        continue
-                    
-                    # Parse questions from student submission
-                    student_questions = parse_questions_from_text(student_text)
-                    
-                    print(f"👤 {user_name}: Found {len(student_questions)} questions in submission")
-                    
-                    # Compare question by question
-                    question_results = []
-                    correct_count = 0
-                    
-                    for i, answer_q in enumerate(answer_key_questions, 1):
-                        # Find corresponding student question
-                        student_q = None
-                        if i <= len(student_questions):
-                            student_q = student_questions[i-1]
-                        
-                        if student_q:
-                            comparison = compare_question_answers(
-                                student_q["content"], 
-                                answer_q["content"]
-                            )
-                            if comparison["is_correct"]:
-                                correct_count += 1
-                        else:
-                            comparison = {
-                                "is_correct": False,
-                                "similarity_score": 0.0,
-                                "feedback": "Question not found in student submission"
-                            }
-                        
-                        question_results.append({
-                            "question_number": i,
-                            "correct_answer": answer_q["content"][:200] + "..." if len(answer_q["content"]) > 200 else answer_q["content"],
-                            "student_answer": student_q["content"][:200] + "..." if student_q and len(student_q["content"]) > 200 else (student_q["content"] if student_q else ""),
-                            "is_correct": comparison["is_correct"],
-                            "similarity_score": comparison["similarity_score"],
-                            "feedback": comparison["feedback"]
-                        })
-                    
-                    score_percentage = (correct_count / len(answer_key_questions)) * 100 if answer_key_questions else 0
-                    
-                    comparison_results.append({
+                    submissions_to_grade.append({
                         "user_id": user_id,
                         "user_name": user_name,
-                        "total_questions": len(answer_key_questions),
-                        "correct_answers": correct_count,
-                        "score_percentage": round(score_percentage, 2),
-                        "question_results": question_results
+                        "student_text": student_text
                     })
-                    
                 except Exception as e:
-                    print(f"Error processing submission: {e}")
-                    comparison_results.append({
-                        "user_id": "unknown",
-                        "user_name": "Unknown",
-                        "error": f"Processing error: {str(e)}",
-                        "total_questions": len(answer_key_questions),
-                        "correct_answers": 0,
-                        "score_percentage": 0.0,
-                        "question_results": []
-                    })
+                    print(f"Error loading submission: {e}")
+                    continue
+        
+        print(f"🔄 Starting parallel grading of {len(submissions_to_grade)} submissions with {max_workers} workers...")
+        
+        def grade_single_submission(submission_data):
+            """Grade a single submission using OpenRouter API."""
+            user_id = submission_data["user_id"]
+            user_name = submission_data["user_name"]
+            student_text = submission_data["student_text"]
+            
+            if not student_text:
+                return {
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "error": "No readable submission content found",
+                    "score": 0,
+                    "feedback": "Could not read submission"
+                }
+            
+            # Create comparison prompt for OpenRouter
+            comparison_prompt = f"""You are an expert grader. Compare the student's submission to the answer key/expected answers and provide a score.
+
+ANSWER KEY / EXPECTED ANSWERS:
+{answer_key_content}
+
+---
+
+STUDENT'S SUBMISSION:
+{student_text}
+
+---
+
+EVALUATION INSTRUCTIONS:
+1. Carefully compare the student's submission to the expected answers
+2. Evaluate if the student's answers are conceptually correct even if worded differently
+3. Look for equivalent solutions and acceptable variations
+4. Provide a score from 0-100 based on accuracy and completeness
+5. Explain your reasoning and identify any errors or missing concepts
+
+Please provide your response in this format:
+SCORE: [0-100]
+FEEDBACK: [Your detailed feedback explaining the score, what was correct, what was missing, and suggestions for improvement]
+"""
+            
+            try:
+                payload = {
+                    "model": openrouter_model,
+                    "messages": [{"role": "user", "content": comparison_prompt}]
+                }
+                
+                response = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {openrouter_api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json=payload,
+                    timeout=120
+                )
+                
+                if response.status_code != 200:
+                    print(f"  ❌ OpenRouter error for {user_id}: {response.status_code}")
+                    return {
+                        "user_id": user_id,
+                        "user_name": user_name,
+                        "error": f"OpenRouter API error: {response.text}",
+                        "score": 0,
+                        "feedback": "Failed to grade submission"
+                    }
+                
+                response_text = response.json()["choices"][0]["message"]["content"]
+                
+                # Extract score and feedback from response
+                score = 0
+                feedback = response_text
+                
+                # Try to extract score from response
+                score_match = re.search(r'SCORE:\s*(\d+)', response_text, re.IGNORECASE)
+                if score_match:
+                    score = int(score_match.group(1))
+                    # Clamp score between 0 and 100
+                    score = max(0, min(100, score))
+                
+                # Extract feedback section
+                feedback_match = re.search(r'FEEDBACK:\s*(.+?)(?:$)', response_text, re.IGNORECASE | re.DOTALL)
+                if feedback_match:
+                    feedback = feedback_match.group(1).strip()
+                
+                print(f"  ✅ {user_id}: Score {score}/100")
+                
+                return {
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "score": score,
+                    "feedback": feedback,
+                    "full_response": response_text
+                }
+                
+            except Exception as e:
+                print(f"  ❌ Error grading {user_id}: {str(e)}")
+                return {
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "error": f"Grading error: {str(e)}",
+                    "score": 0,
+                    "feedback": "Failed to grade submission"
+                }
+        
+        # Use ThreadPoolExecutor for parallel processing
+        comparison_results = []
+        start_time = time.time()
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_submission = {executor.submit(grade_single_submission, sub): sub for sub in submissions_to_grade}
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_submission):
+                result = future.result()
+                comparison_results.append(result)
+        
+        elapsed_time = time.time() - start_time
         
         # Save detailed results
-        results_file = data_dir / f"comparison_results_assignment_{assignment_id}.jsonl"
+        if course_id and course_id != "unknown":
+            results_file = data_dir / f"comparison_results_course_{course_id}_assignment_{assignment_id}.jsonl"
+        else:
+            results_file = data_dir / f"comparison_results_assignment_{assignment_id}.jsonl"
+        
         with open(results_file, 'w', encoding='utf-8') as f:
             for result in comparison_results:
                 f.write(json.dumps(result, ensure_ascii=False) + '\n')
         
         # Calculate summary statistics
         total_students = len(comparison_results)
-        total_questions = len(answer_key_questions)
-        avg_score = sum(r.get("score_percentage", 0) for r in comparison_results) / total_students if total_students > 0 else 0
+        successful_grades = [r for r in comparison_results if "score" in r and "error" not in r]
+        avg_score = sum(r.get("score", 0) for r in successful_grades) / len(successful_grades) if successful_grades else 0
+        failed_count = total_students - len(successful_grades)
         
         summary = {
             "assignment_id": assignment_id,
+            "course_id": course_id,
             "total_students": total_students,
-            "total_questions": total_questions,
+            "successfully_graded": len(successful_grades),
+            "failed_to_grade": failed_count,
             "average_score": round(avg_score, 2),
             "results_file": str(results_file),
-            "answer_key_questions": len(answer_key_questions),
             "comparison_results": comparison_results
         }
         
-        print(f"✅ Comparison complete: {total_students} students, {total_questions} questions, {avg_score:.1f}% avg score")
+        print(f"✅ Comparison complete: {total_students} students, {len(successful_grades)} graded, {avg_score:.1f}% avg score")
         
         return jsonify(summary)
         
     except Exception as e:
         print(f"❌ Comparison error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @APP.route("/api/comparison-results/<assignment_id>", methods=["GET"])
@@ -1169,18 +1815,24 @@ def api_grade():
     if not backend or not prompt:
         return jsonify({"error": "backend and prompt required"}), 400
     cfg = load_env()
+    
+    # Allow course_id and assignment_id to be passed in payload or use config defaults
+    course_id = payload.get("course_id") or cfg.get("CANVAS_COURSE_ID")
+    assignment_id = payload.get("assignment_id") or cfg.get("CANVAS_ASSIGNMENT_ID")
+    
+    if not course_id or not assignment_id:
+        return jsonify({"error": "course_id and assignment_id are required"}), 400
+    
     out_file = os.path.join(cfg.get("DATA_DIR", "./data"), cfg.get("RESULTS_FILE", "results.jsonl"))
     try:
-        summary = run_grading(
+        summary = grade_assignments(
             backend=backend,
             prompt=prompt,
             out_path=out_file,
             canvas_api_url=cfg.get("CANVAS_API_URL"),
             canvas_api_token=cfg.get("CANVAS_API_TOKEN"),
-            course_id=cfg.get("CANVAS_COURSE_ID"),
-            assignment_id=cfg.get("CANVAS_ASSIGNMENT_ID"),
-            ollama_host=cfg.get("OLLAMA_HOST"),
-            ollama_model=cfg.get("OLLAMA_MODEL"),
+            course_id=course_id,
+            assignment_id=assignment_id,
             openrouter_api_key=cfg.get("OPENROUTER_API_KEY"),
             openrouter_model=cfg.get("OPENROUTER_MODEL"),
         )

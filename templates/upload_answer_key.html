@@ -1,11 +1,62 @@
 {% extends "layout.html" %}
 {% block content %}
 <h2>Upload Answer Key</h2>
+
+{% with messages = get_flashed_messages(with_categories=True) %}
+  {% if messages %}
+    {% for category, message in messages %}
+      <div class="alert alert-{{ 'success' if category == 'success' else 'danger' }} alert-dismissible fade show" role="alert">
+        {{ message }}
+        {% if category == 'success' and 'successfully uploaded' in message %}
+          <br><small>💡 <strong>Tip:</strong> You can now parse questions from your answer key using the "Parse Questions" button below!</small>
+        {% endif %}
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+      </div>
+    {% endfor %}
+  {% endif %}
+{% endwith %}
+
 <form method="post" enctype="multipart/form-data">
-  <div class="mb-3">
-    <label for="assignmentId" class="form-label"><b>Assignment ID</b></label>
-    <input class="form-control" type="text" id="assignmentId" name="assignment_id" placeholder="Enter assignment ID (e.g., 12345)" required>
-    <div class="form-text">This will create the answer key in downloads/assignment_{id}/answer_key/</div>
+  <div class="row">
+    <div class="col-md-6">
+      <div class="mb-3">
+        <label for="courseSelect" class="form-label"><b>Select Course</b></label>
+        <select id="courseSelect" class="form-control">
+          <option value="">Loading courses...</option>
+        </select>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="mb-3">
+        <label for="assignmentSelect" class="form-label"><b>Select Assignment</b></label>
+        <div class="form-check mb-2">
+          <input class="form-check-input" type="checkbox" id="fileUploadsOnly" checked>
+          <label class="form-check-label" for="fileUploadsOnly">
+            Show only assignments that require file uploads
+          </label>
+        </div>
+        <select id="assignmentSelect" class="form-control">
+          <option value="">Select a course first...</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  
+  <div class="row">
+    <div class="col-md-6">
+      <div class="mb-3">
+        <label for="courseId" class="form-label"><b>Course ID</b></label>
+        <input class="form-control" type="text" id="courseId" name="course_id" placeholder="Enter course ID manually or select from dropdown above" required>
+        <div class="form-text">Course ID for organizing answer keys</div>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="mb-3">
+        <label for="assignmentId" class="form-label"><b>Assignment ID</b></label>
+        <input class="form-control" type="text" id="assignmentId" name="assignment_id" placeholder="Enter assignment ID manually or select from dropdown above" required>
+        <div class="form-text">This will create the answer key in downloads/course_{course_id}/assignment_{id}/</div>
+      </div>
+    </div>
   </div>
   
   <div class="mb-3">
@@ -20,23 +71,330 @@
 {% if existing_answer_keys %}
 <hr>
 <h5>Existing Answer Keys</h5>
+
+<script>
+// Course and Assignment Loading Functions
+async function loadCourses() {
+  const sel = document.getElementById('courseSelect');
+  sel.innerHTML = '<option value="">Loading courses...</option>';
+  
+  try {
+    const res = await fetch('/api/canvas/courses');
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    
+    const courses = await res.json();
+    sel.innerHTML = '<option value="">Select a course...</option>';
+    
+    if (!courses || courses.length === 0) {
+      sel.innerHTML = '<option value="">No courses available</option>';
+    } else {
+      courses.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.name || c.course_code || c.id;
+        sel.appendChild(opt);
+      });
+    }
+  } catch (error) {
+    console.error('Error loading courses:', error);
+    sel.innerHTML = '<option value="">Error loading courses</option>';
+  }
+}
+
+async function loadAssignments() {
+  const courseId = document.getElementById('courseSelect').value;
+  const fileUploadsOnly = document.getElementById('fileUploadsOnly').checked;
+  const sel = document.getElementById('assignmentSelect');
+  
+  if (!courseId) {
+    sel.innerHTML = '<option value="">Select a course first...</option>';
+    return;
+  }
+  
+  sel.innerHTML = '<option value="">Loading assignments...</option>';
+  sel.disabled = true;
+  
+  try {
+    const url = `/api/canvas/${courseId}/assignments?file_uploads_only=${fileUploadsOnly}`;
+    const res = await fetch(url);
+    
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    
+    const assigns = await res.json();
+    sel.innerHTML = '';
+    
+    if (!assigns || assigns.length === 0) {
+      const filterMsg = fileUploadsOnly ? ' (with file uploads)' : '';
+      sel.innerHTML = `<option value="">No assignments found${filterMsg}</option>`;
+    } else {
+      sel.innerHTML = '<option value="">Select an assignment...</option>';
+      assigns.forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        
+        // Show submission types in the option text
+        const submissionTypes = a.submission_types || [];
+        const hasFileUpload = submissionTypes.includes('online_upload') || submissionTypes.includes('media_recording');
+        const typeIndicator = hasFileUpload ? ' 📁' : '';
+        
+        opt.textContent = `${a.name || a.id}${typeIndicator}`;
+        sel.appendChild(opt);
+      });
+    }
+    
+    sel.disabled = false;
+    console.log(`Loaded ${assigns.length} assignments${fileUploadsOnly ? ' (file uploads only)' : ''}`);
+    
+  } catch (error) {
+    console.error('Error loading assignments:', error);
+    sel.innerHTML = '<option value="">Error loading assignments</option>';
+    sel.disabled = false;
+  }
+}
+
+function onCourseChange() {
+  const courseId = document.getElementById('courseSelect').value;
+  const courseIdInput = document.getElementById('courseId');
+  courseIdInput.value = courseId;
+  
+  if (courseId) {
+    loadAssignments();
+  } else {
+    const assignmentSelect = document.getElementById('assignmentSelect');
+    assignmentSelect.innerHTML = '<option value="">Select a course first...</option>';
+    document.getElementById('assignmentId').value = '';
+  }
+}
+
+function onAssignmentChange() {
+  const assignmentId = document.getElementById('assignmentSelect').value;
+  const assignmentIdInput = document.getElementById('assignmentId');
+  assignmentIdInput.value = assignmentId;
+}
+
+function onFilterChange() {
+  const courseId = document.getElementById('courseSelect').value;
+  if (courseId) {
+    loadAssignments();
+  }
+}
+
+function onManualCourseChange() {
+  const courseId = document.getElementById('courseId').value;
+  const courseSelect = document.getElementById('courseSelect');
+  
+  // Try to select the matching course in dropdown if it exists
+  if (courseId && courseSelect.value !== courseId) {
+    courseSelect.value = courseId;
+    if (courseSelect.value === courseId) {
+      loadAssignments();
+    }
+  }
+}
+
+function onManualAssignmentChange() {
+  const assignmentId = document.getElementById('assignmentId').value;
+  const assignmentSelect = document.getElementById('assignmentSelect');
+  
+  // Try to select the matching assignment in dropdown if it exists
+  if (assignmentId && !assignmentSelect.disabled) {
+    assignmentSelect.value = assignmentId;
+  }
+}
+
+// Event listeners
+document.getElementById('courseSelect').addEventListener('change', onCourseChange);
+document.getElementById('assignmentSelect').addEventListener('change', onAssignmentChange);
+document.getElementById('fileUploadsOnly').addEventListener('change', onFilterChange);
+document.getElementById('courseId').addEventListener('input', onManualCourseChange);
+document.getElementById('assignmentId').addEventListener('input', onManualAssignmentChange);
+
+// Load courses on page load
+document.addEventListener('DOMContentLoaded', function() {
+  loadCourses();
+});
+
+async function parseQuestions(assignmentId, filename) {
+  const btnId = `parse-btn-${assignmentId}-${filename.replace(/\./g, '_')}`;
+  const statusId = `parse-status-${assignmentId}-${filename.replace(/\./g, '_')}`;
+  const btn = document.getElementById(btnId);
+  const statusDiv = document.getElementById(statusId);
+  
+  // Show loading state
+  btn.disabled = true;
+  btn.textContent = 'Parsing...';
+  statusDiv.style.display = 'block';
+  statusDiv.innerHTML = '<div class="alert alert-info">⏳ Parsing questions with OpenRouter AI...</div>';
+  
+  try {
+    const response = await fetch(`/api/parse-questions/${assignmentId}/${filename}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const data = await response.json();
+    
+    if (response.ok && data.success) {
+      statusDiv.innerHTML = `
+        <div class="alert alert-success">
+          ✅ ${data.message}
+          <br><small>Questions saved to: assignment_${assignmentId}/questions/</small>
+        </div>
+      `;
+      btn.textContent = 'Re-parse Questions';
+      
+      // Reload page to show updated status
+      setTimeout(() => {
+        window.location.reload();
+      }, 2000);
+    } else {
+      statusDiv.innerHTML = `
+        <div class="alert alert-danger">
+          ❌ Error: ${data.error || 'Failed to parse questions'}
+        </div>
+      `;
+      btn.textContent = 'Parse Questions';
+    }
+  } catch (error) {
+    console.error('Parse error:', error);
+    statusDiv.innerHTML = `
+      <div class="alert alert-danger">
+        ❌ Network error: ${error.message}
+      </div>
+    `;
+    btn.textContent = 'Parse Questions';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function parseQuestionsWithCourse(courseId, assignmentId, filename) {
+  const btnId = `parse-btn-${courseId}-${assignmentId}-${filename.replace(/\./g, '_')}`;
+  const statusId = `parse-status-${courseId}-${assignmentId}-${filename.replace(/\./g, '_')}`;
+  const btn = document.getElementById(btnId);
+  const statusDiv = document.getElementById(statusId);
+  
+  // Show loading state
+  btn.disabled = true;
+  btn.textContent = 'Parsing...';
+  statusDiv.style.display = 'block';
+  statusDiv.innerHTML = '<div class="alert alert-info">⏳ Parsing questions with OpenRouter AI...</div>';
+  
+  try {
+    const response = await fetch(`/api/parse-questions/${courseId}/${assignmentId}/${filename}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const data = await response.json();
+    
+    if (response.ok && data.success) {
+      statusDiv.innerHTML = `
+        <div class="alert alert-success">
+          ✅ ${data.message}
+          <br><small>Questions saved to: course_${courseId}/assignment_${assignmentId}/questions/</small>
+        </div>
+      `;
+      btn.textContent = 'Re-parse Questions';
+      
+      // Reload page to show updated status
+      setTimeout(() => {
+        window.location.reload();
+      }, 2000);
+    } else {
+      statusDiv.innerHTML = `
+        <div class="alert alert-danger">
+          ❌ Error: ${data.error || 'Failed to parse questions'}
+        </div>
+      `;
+      btn.textContent = 'Parse Questions';
+    }
+  } catch (error) {
+    console.error('Parse error:', error);
+    statusDiv.innerHTML = `
+      <div class="alert alert-danger">
+        ❌ Network error: ${error.message}
+      </div>
+    `;
+    btn.textContent = 'Parse Questions';
+  } finally {
+    btn.disabled = false;
+  }
+}
+</script>
 <div class="row">
   {% for key in existing_answer_keys %}
   <div class="col-md-6 mb-3">
     <div class="card">
       <div class="card-body">
-        <h6 class="card-title">Assignment {{ key.assignment_id }}</h6>
+        <h6 class="card-title">
+          {% if key.legacy %}
+            Assignment {{ key.assignment_id }} <small class="text-warning">(Legacy)</small>
+          {% else %}
+            Course {{ key.course_id }} - Assignment {{ key.assignment_id }}
+          {% endif %}
+        </h6>
         <p class="card-text">
           <strong>{{ key.filename }}</strong><br>
           <small class="text-muted">
             Size: {{ key.size }} bytes<br>
             Modified: {{ key.modified }}<br>
-            Path: downloads/assignment_{{ key.assignment_id }}/answer_key/
+            {% if key.legacy %}
+              Path: downloads/assignment_{{ key.assignment_id }}/answer_key/<br>
+            {% else %}
+              Path: downloads/course_{{ key.course_id }}/assignment_{{ key.assignment_id }}/answer_key/<br>
+            {% endif %}
+            {% if key.has_parsed_questions %}
+              {% if key.legacy %}
+                Parsed questions: assignment_{{ key.assignment_id }}/questions/
+              {% else %}
+                Parsed questions: course_{{ key.course_id }}/assignment_{{ key.assignment_id }}/questions/
+              {% endif %}
+            {% endif %}
           </small>
         </p>
         <div>
-          <span class="badge bg-success">Assignment {{ key.assignment_id }}</span>
-          <a href="{{ url_for('download_answer_key', assignment_id=key.assignment_id, filename=key.filename) }}" class="btn btn-sm btn-outline-primary ms-2">Download</a>
+          {% if key.legacy %}
+            <span class="badge bg-warning">Legacy Assignment {{ key.assignment_id }}</span>
+          {% else %}
+            <span class="badge bg-primary">Course {{ key.course_id }}</span>
+            <span class="badge bg-success ms-1">Assignment {{ key.assignment_id }}</span>
+          {% endif %}
+          {% if key.has_parsed_questions %}
+            <span class="badge bg-info ms-1">Questions Parsed ✓</span>
+          {% endif %}
+          <div class="mt-2">
+            {% if key.legacy %}
+              <a href="{{ url_for('download_answer_key', assignment_id=key.assignment_id, filename=key.filename) }}" class="btn btn-sm btn-outline-primary">Download Answer Key</a>
+              <button type="button" class="btn btn-sm btn-outline-success ms-1" onclick="parseQuestions('{{ key.assignment_id }}', '{{ key.filename }}')" id="parse-btn-{{ key.assignment_id }}-{{ key.filename | replace('.', '_') }}">
+                {% if key.has_parsed_questions %}Re-parse Questions{% else %}Parse Questions{% endif %}
+              </button>
+              {% if key.has_parsed_questions %}
+                <a href="{{ url_for('download_parsed_questions', assignment_id=key.assignment_id, filename='parsed_questions_' + key.filename + '.md') }}" class="btn btn-sm btn-outline-info ms-1">Download Parsed Questions</a>
+              {% endif %}
+            {% else %}
+              <a href="{{ url_for('download_answer_key_with_course', course_id=key.course_id, assignment_id=key.assignment_id, filename=key.filename) }}" class="btn btn-sm btn-outline-primary">Download Answer Key</a>
+              <button type="button" class="btn btn-sm btn-outline-success ms-1" onclick="parseQuestionsWithCourse('{{ key.course_id }}', '{{ key.assignment_id }}', '{{ key.filename }}')" id="parse-btn-{{ key.course_id }}-{{ key.assignment_id }}-{{ key.filename | replace('.', '_') }}">
+                {% if key.has_parsed_questions %}Re-parse Questions{% else %}Parse Questions{% endif %}
+              </button>
+              {% if key.has_parsed_questions %}
+                <a href="{{ url_for('download_parsed_questions_with_course', course_id=key.course_id, assignment_id=key.assignment_id, filename='parsed_questions_' + key.filename + '.md') }}" class="btn btn-sm btn-outline-info ms-1">Download Parsed Questions</a>
+              {% endif %}
+            {% endif %}
+          </div>
+          {% if key.legacy %}
+            <div id="parse-status-{{ key.assignment_id }}-{{ key.filename | replace('.', '_') }}" class="mt-2" style="display: none;"></div>
+          {% else %}
+            <div id="parse-status-{{ key.course_id }}-{{ key.assignment_id }}-{{ key.filename | replace('.', '_') }}" class="mt-2" style="display: none;"></div>
+          {% endif %}
         </div>
       </div>
     </div>
