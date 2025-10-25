@@ -1,0 +1,144 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="container mt-4">
+  <h2>Setup Wizard</h2>
+  <form method="POST" action="/setup">
+    <div class="mb-3">
+      <label for="CANVAS_API_URL" class="form-label">Canvas API URL</label>
+      <input type="text" name="CANVAS_API_URL" id="CANVAS_API_URL" class="form-control"
+             value="{{ config.get('CANVAS_API_URL', 'https://canvas.instructure.com') }}">
+    </div>
+
+    <div class="mb-3">
+      <label for="CANVAS_API_TOKEN" class="form-label">Canvas API Token</label>
+      <div class="input-group">
+        <input type="password" name="CANVAS_API_TOKEN" id="CANVAS_API_TOKEN" class="form-control"
+               value="{{ config.get('CANVAS_API_TOKEN', '') }}">
+        <button type="button" id="btnValidate" class="btn btn-outline-secondary">Validate Token</button>
+      </div>
+      <div id="validateStatus" class="form-text mt-1"></div>
+    </div>
+
+    <div class="mb-3">
+      <label for="courseSelect" class="form-label">Select Course</label>
+      <select id="courseSelect" class="form-control">
+        <option value="">Loading courses...</option>
+      </select>
+      <input type="hidden" name="CANVAS_COURSE_ID" id="CANVAS_COURSE_ID" value="{{ config.get('CANVAS_COURSE_ID', '') }}">
+    </div>
+
+    <div class="mb-3">
+      <label for="assignmentSelect" class="form-label">Select Assignment</label>
+      <div class="form-check mb-2">
+        <input class="form-check-input" type="checkbox" id="fileUploadsOnly" checked>
+        <label class="form-check-label" for="fileUploadsOnly">
+          Show only assignments that require file uploads
+        </label>
+      </div>
+      <select id="assignmentSelect" class="form-control">
+        <option value="">Select a course first...</option>
+      </select>
+      <input type="hidden" name="CANVAS_ASSIGNMENT_ID" id="CANVAS_ASSIGNMENT_ID" value="{{ config.get('CANVAS_ASSIGNMENT_ID', '') }}">
+    </div>
+
+    <button type="submit" class="btn btn-primary">Save Settings</button>
+  </form>
+</div>
+
+<script>
+async function validateToken() {
+  const api_url = document.getElementById('CANVAS_API_URL').value;
+  const token = document.getElementById('CANVAS_API_TOKEN').value;
+  const canvas_url = `${api_url.replace(/\/+$/, '')}/api/v1`;
+  const res = await fetch(`/api/canvas/validate?api_url=${encodeURIComponent(canvas_url)}&token=${encodeURIComponent(token)}`);
+  const data = await res.json();
+  const s = document.getElementById('validateStatus');
+  if (data.ok) { s.textContent = `Hello, ${data.user && (data.user.name || data.user.short_name)}`; s.className='text-success'; }
+  else { s.textContent = 'Invalid token'; s.className='text-danger'; }
+}
+document.getElementById('btnValidate').addEventListener('click', validateToken);
+
+async function loadCourses() {
+  const api_url = document.getElementById('CANVAS_API_URL').value;
+  const token = document.getElementById('CANVAS_API_TOKEN').value;
+  const canvas_url = `${api_url.replace(/\/+$/, '')}/api/v1`;
+  const res = await fetch(`/api/canvas/courses?api_url=${encodeURIComponent(canvas_url)}&token=${encodeURIComponent(token)}`);
+  const courses = await res.json();
+  const sel = document.getElementById('courseSelect');
+  sel.innerHTML = '';
+  (courses || []).forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.id; opt.textContent = c.name || c.course_code || c.id;
+    if (String(c.id) === '{{ config.get("CANVAS_COURSE_ID","") }}') opt.selected = true;
+    sel.appendChild(opt);
+  });
+  if (sel.value) await loadAssignments();
+}
+async function loadAssignments() {
+  const api_url = document.getElementById('CANVAS_API_URL').value;
+  const token = document.getElementById('CANVAS_API_TOKEN').value;
+  const canvas_url = `${api_url.replace(/\/+$/, '')}/api/v1`;
+  const cid = document.getElementById('courseSelect').value;
+  const fileUploadsOnly = document.getElementById('fileUploadsOnly').checked;
+  
+  if (!cid) return;
+  
+  const sel = document.getElementById('assignmentSelect');
+  sel.innerHTML = '<option value="">Loading assignments...</option>';
+  sel.disabled = true;
+  
+  try {
+    const url = `/api/canvas/${cid}/assignments?api_url=${encodeURIComponent(canvas_url)}&token=${encodeURIComponent(token)}&file_uploads_only=${fileUploadsOnly}`;
+    const res = await fetch(url);
+    
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    
+    const assigns = await res.json();
+    sel.innerHTML = '';
+    
+    if (!assigns || assigns.length === 0) {
+      sel.innerHTML = '<option value="">No assignments found</option>';
+    } else {
+      sel.innerHTML = '<option value="">Select an assignment...</option>';
+      assigns.forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.id; 
+        
+        // Show submission types in the option text
+        const submissionTypes = a.submission_types || [];
+        const hasFileUpload = submissionTypes.includes('online_upload') || submissionTypes.includes('media_recording');
+        const typeIndicator = hasFileUpload ? ' 📁' : '';
+        
+        opt.textContent = `${a.name || a.id}${typeIndicator}`;
+        if (String(a.id) === '{{ config.get("CANVAS_ASSIGNMENT_ID","") }}') opt.selected = true;
+        sel.appendChild(opt);
+      });
+    }
+    
+    sel.disabled = false;
+    console.log(`Loaded ${assigns.length} assignments${fileUploadsOnly ? ' (file uploads only)' : ''}`);
+    
+  } catch (error) {
+    console.error('Error loading assignments:', error);
+    sel.innerHTML = '<option value="">Error loading assignments</option>';
+    sel.disabled = false;
+  }
+}
+document.getElementById('courseSelect').addEventListener('change', function() {
+  document.getElementById('CANVAS_COURSE_ID').value = this.value;
+  loadAssignments();
+});
+document.getElementById('assignmentSelect').addEventListener('change', function() {
+  document.getElementById('CANVAS_ASSIGNMENT_ID').value = this.value;
+});
+document.getElementById('fileUploadsOnly').addEventListener('change', function() {
+  const courseId = document.getElementById('courseSelect').value;
+  if (courseId) {
+    loadAssignments();
+  }
+});
+loadCourses();
+</script>
+{% endblock %}

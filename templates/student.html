@@ -1,0 +1,277 @@
+{% extends "layout.html" %}
+{% block content %}
+<h2>Student Grades</h2>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-6">
+        <label for="courseSelect" class="form-label"><b>Select Course</b></label>
+        <select id="courseSelect" class="form-control">
+          <option value="">All Courses (Overall Grade)</option>
+        </select>
+      </div>
+      <div class="col-md-6">
+        <label for="assignmentSelect" class="form-label"><b>Select Assignment (Optional)</b></label>
+        <select id="assignmentSelect" class="form-control">
+          <option value="">All Assignments (Overall Grade)</option>
+        </select>
+      </div>
+    </div>
+    <button class="btn btn-primary mt-3" onclick="loadStudents()">Filter</button>
+  </div>
+</div>
+
+<div id="gradeInfo" class="alert alert-info" style="display: none;">
+  <span id="gradeInfoText"></span>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <div id="studentTableContainer">
+      <table class="students-table" id="studentsTable">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>User ID</th>
+            <th># Submissions</th>
+            <th>Score</th>
+            <th>Last Submission</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="studentsBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+let allComparison = {};  // Store comparison results by course_id and assignment_id
+
+// Load available courses and assignments
+async function loadCoursesAndAssignments() {
+  try {
+    const courseRes = await fetch('/api/available-courses');
+    const courseData = await courseRes.json();
+    
+    const courseSelect = document.getElementById('courseSelect');
+    
+    if (courseData.courses && courseData.courses.length > 0) {
+      courseData.courses.forEach(course => {
+        if (course.course_id !== 'unknown' || !course.legacy) {
+          const opt = document.createElement('option');
+          opt.value = course.course_id;
+          opt.textContent = course.course_name;
+          courseSelect.appendChild(opt);
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error loading courses:', error);
+  }
+}
+
+// Load assignments for selected course
+async function onCourseChange() {
+  const courseId = document.getElementById('courseSelect').value;
+  const assignmentSelect = document.getElementById('assignmentSelect');
+  assignmentSelect.innerHTML = '<option value="">All Assignments (Overall Grade)</option>';
+  
+  if (courseId) {
+    try {
+      const res = await fetch(`/api/course-assignments-with-questions/${courseId}`);
+      const data = await res.json();
+      
+      if (data.assignments && data.assignments.length > 0) {
+        data.assignments.forEach(assignment => {
+          const opt = document.createElement('option');
+          opt.value = assignment.assignment_id;
+          opt.textContent = assignment.assignment_name;
+          assignmentSelect.appendChild(opt);
+        });
+      }
+    } catch (error) {
+      console.error('Error loading assignments:', error);
+    }
+  }
+}
+
+async function loadStudents() {
+  const courseId = document.getElementById('courseSelect').value;
+  const assignmentId = document.getElementById('assignmentSelect').value;
+  const courseSelect = document.getElementById('courseSelect');
+  const assignmentSelect = document.getElementById('assignmentSelect');
+  
+  // Get display names from selected options
+  const courseText = courseSelect.options[courseSelect.selectedIndex].text;
+  const assignmentText = assignmentSelect.options[assignmentSelect.selectedIndex].text;
+  
+  // If both course and assignment are selected, load comparison results directly
+  if (courseId && assignmentId) {
+    try {
+      const res = await fetch(`/api/comparison-results/${courseId}/${assignmentId}`);
+      const data = await res.json();
+      
+      if (res.ok && data.results) {
+        displayComparisonResults(data.results, courseId, assignmentId);
+        
+        // Show filter info with course and assignment names
+        const gradeInfo = document.getElementById('gradeInfo');
+        const gradeInfoText = document.getElementById('gradeInfoText');
+        gradeInfoText.textContent = `📊 Showing grades for ${courseText} > ${assignmentText}`;
+        gradeInfo.style.display = 'block';
+        return;
+      }
+    } catch (error) {
+      console.error('Error loading comparison results:', error);
+    }
+  }
+  
+  // Otherwise, fall back to old method using manifest and results
+  const [manifestRes, resultsRes] = await Promise.all([fetch('/api/manifest'), fetch('/api/results')]);
+  const manifest = await manifestRes.json();
+  const results = await resultsRes.json();
+
+  // Group by student id
+  const students = {};
+  for (const m of manifest) {
+    const id = m.user_id || 'unknown';
+    const name = m.user_name || 'Unknown';
+    
+    // Filter by course if selected
+    if (courseId && m.course_id && m.course_id !== courseId) continue;
+    
+    students[id] = students[id] || { 
+      user_id: id, 
+      user_name: name, 
+      submissions: [], 
+      lastSubmitted: null,
+      scores: []  // Store all scores for average calculation
+    };
+    
+    // Use submitted_at from manifest if present
+    if (m.submitted_at) {
+      const d = new Date(m.submitted_at);
+      if (!students[id].lastSubmitted || d > students[id].lastSubmitted) {
+        students[id].lastSubmitted = d;
+      }
+    }
+  }
+
+  for (const r of results) {
+    const id = r.user_id || 'unknown';
+    
+    // Filter by course and assignment if selected
+    if (courseId && r.course_id && r.course_id !== courseId) continue;
+    if (assignmentId && r.assignment_id && r.assignment_id !== assignmentId) continue;
+    
+    students[id] = students[id] || { 
+      user_id: id,  
+      submissions: [], 
+      lastSubmitted: null,
+      scores: []
+    };
+    
+    students[id].submissions.push(r);
+    
+    // Collect score (handle both 'score' and 'score_percentage' fields)
+    const score = r.score !== undefined ? r.score : (r.score_percentage !== undefined ? r.score_percentage : 0);
+    if (score > 0) {
+      students[id].scores.push(score);
+    }
+    
+    if (r.submitted_at) {
+      const d = new Date(r.submitted_at);
+      if (!students[id].lastSubmitted || d > students[id].lastSubmitted) {
+        students[id].lastSubmitted = d;
+      }
+    }
+  }
+
+  displayStudentTable(students);
+  
+  // Show filter info with human-readable names
+  const gradeInfo = document.getElementById('gradeInfo');
+  const gradeInfoText = document.getElementById('gradeInfoText');
+  
+  if (courseId && assignmentId) {
+    gradeInfoText.textContent = `📊 Showing grades for ${courseText} > ${assignmentText}`;
+  } else if (courseId) {
+    gradeInfoText.textContent = `📊 Showing overall grades for ${courseText}`;
+  } else if (assignmentId) {
+    gradeInfoText.textContent = `📊 Showing grades for ${assignmentText}`;
+  } else {
+    gradeInfoText.textContent = `📊 Showing overall class grades`;
+  }
+  gradeInfo.style.display = 'block';
+}
+
+function displayComparisonResults(results, courseId, assignmentId) {
+  const tbody = document.getElementById('studentsBody');
+  tbody.innerHTML = '';
+  let idx = 1;
+  
+  results.forEach(r => {
+    const id = r.user_id || 'unknown';
+    const name = r.user_name || 'Unknown';
+    const score = r.score !== undefined ? r.score : 0;
+    const scoreClass = score >= 80 ? 'text-success' : score >= 60 ? 'text-warning' : 'text-danger';
+    
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${idx}</td>
+      <td>${id}</td>
+      <td style="text-align:center">1</td>
+      <td style="text-align:center"><span class="${scoreClass} fw-bold">${score}%</span></td>
+      <td>-</td>
+      <td style="text-align:center"><a class="btn btn-accent" href="${location.origin + '/submissions'}">View</a></td>
+    `;
+    tbody.appendChild(tr);
+    idx += 1;
+  });
+}
+
+function displayStudentTable(students) {
+  const tbody = document.getElementById('studentsBody');
+  tbody.innerHTML = '';
+  let idx = 1;
+  
+  Object.values(students)
+    .sort((a, b) => (b.submissions.length || 0) - (a.submissions.length || 0))
+    .forEach(s => {
+      // Calculate average score from comparison results
+      let avg = 0;
+      if (s.scores.length > 0) {
+        avg = (s.scores.reduce((a, b) => a + b, 0) / s.scores.length).toFixed(2);
+      } else {
+        // Fallback to old method
+        avg = (s.submissions.reduce((a, b) => a + (b.score || 0), 0) / Math.max(1, s.submissions.length)).toFixed(2);
+      }
+      
+      const last = s.lastSubmitted ? s.lastSubmitted.toLocaleString() : '-';
+      const scoreClass = avg >= 80 ? 'text-success' : avg >= 60 ? 'text-warning' : 'text-danger';
+      
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${idx}</td>
+        <td>${s.user_id}</td>
+        <td style="text-align:center">${s.submissions.length || 0}</td>
+        <td style="text-align:center"><span class="${scoreClass} fw-bold">${avg}%</span></td>
+        <td>${last}</td>
+        <td style="text-align:center"><a class="btn btn-accent" href="${location.origin + '/submissions'}">View</a></td>
+      `;
+      tbody.appendChild(tr);
+      idx += 1;
+    });
+}
+
+document.getElementById('courseSelect').addEventListener('change', onCourseChange);
+
+// Load courses on page load
+document.addEventListener('DOMContentLoaded', function() {
+  loadCoursesAndAssignments();
+  loadStudents();
+});
+</script>
+{% endblock %}

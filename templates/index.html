@@ -1,0 +1,62 @@
+{% extends "layout.html" %}
+{% block content %}
+<h2>Dashboard</h2>
+<div class="mb-3 page-actions">
+  <button id="refreshBtn" class="btn btn-outline-secondary">Refresh Data</button>
+  <a class="btn btn-success" href="{{ url_for('submissions') }}">Get Submissions</a>
+  <a class="btn btn-primary" href="{{ url_for('upload_answer_key') }}">Upload Answer Key</a>
+</div>
+
+<div id="summaryCards" class="row gy-3">
+  <!-- filled by JS -->
+</div>
+
+<div class="mt-4">
+  <canvas id="assignmentAverageChart" height="100"></canvas>
+</div>
+
+<script>
+async function refresh() {
+  const [manifestRes, resultsRes] = await Promise.all([fetch('/api/manifest'), fetch('/api/results')]);
+  const manifest = await manifestRes.json();
+  const results = await resultsRes.json();
+  const students = manifest.length;
+  const files = manifest.reduce((c,m) => c + (m.attachments ? m.attachments.length : 0), 0);
+  const assignments = new Set(results.map(r=>r.assignment_id)).size || 1;
+  const avgScore = results.reduce((s,r)=> s + (r.score||0), 0) / Math.max(1, results.length);
+  document.getElementById('summaryCards').innerHTML = `
+    <div class="col-md-3"><div class="card p-3">Students: <strong>${students}</strong></div></div>
+    <div class="col-md-3"><div class="card p-3">Files: <strong>${files}</strong></div></div>
+    <div class="col-md-3"><div class="card p-3">Assignments: <strong>${assignments}</strong></div></div>
+    <div class="col-md-3"><div class="card p-3">Avg Score: <strong>${(avgScore||0).toFixed(2)}</strong></div></div>
+  `;
+  // build chart data: group by assignment
+  const byAssign = {};
+  for(const r of results) {
+    byAssign[r.assignment_id] = byAssign[r.assignment_id]||{sum:0,count:0};
+    if(typeof r.score === 'number') {
+      byAssign[r.assignment_id].sum += r.score;
+      byAssign[r.assignment_id].count += 1;
+    }
+  }
+  const labels = Object.keys(byAssign);
+  const data = labels.map(k => {
+    const obj = byAssign[k];
+    return obj.count ? (obj.sum / obj.count) : 0;
+  });
+  const ctx = document.getElementById('assignmentAverageChart').getContext('2d');
+  if(window.assignmentChart) window.assignmentChart.destroy();
+  window.assignmentChart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Avg Score', data }] }
+  });
+}
+
+document.getElementById('refreshBtn').addEventListener('click', async () => {
+  await fetch('/api/refresh');
+  await refresh();
+});
+
+refresh();
+</script>
+{% endblock %}

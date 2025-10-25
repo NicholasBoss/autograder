@@ -1,0 +1,82 @@
+{% extends "layout.html" %}
+{% block content %}
+<h2>Assignments</h2>
+<div class="mb-3">
+  <button id="gradeNowBtn" class="btn btn-success">Grade Now</button>
+</div>
+
+<div id="assignList"></div>
+
+<!-- Grade Now modal -->
+<div class="modal" tabindex="-1" id="gradeModal">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Grade Now</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="mb-2">
+          <label>Backend</label>
+          <select id="backendSelect" class="form-select">
+            <option value="openrouter">OpenRouter</option>
+          </select>
+        </div>
+        <div class="mb-2">
+          <label>Prompt</label>
+          <textarea id="promptInput" class="form-control" rows="6">Provide concise feedback and a score out of 10.</textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="startGradeBtn" class="btn btn-primary">Start</button>
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function loadAssignments() {
+  const res = await fetch('/api/results');
+  const rows = await res.json();
+  // group by assignment
+  const grouped = {};
+  for(const r of rows) {
+    grouped[r.assignment_id] = grouped[r.assignment_id]||{rows:[], avg:0};
+    grouped[r.assignment_id].rows.push(r);
+  }
+  let html = '<div class="list-group">';
+  for(const aid in grouped) {
+    const g = grouped[aid];
+    const avg = (g.rows.reduce((s,r)=>s+(r.score||0),0)/Math.max(1,g.rows.length)).toFixed(2);
+    html += `<a class="list-group-item list-group-item-action" href="#">Assignment ${aid} — Avg: ${avg} — Submissions: ${g.rows.length}</a>`;
+  }
+  html += '</div>';
+  document.getElementById('assignList').innerHTML = html;
+}
+
+document.getElementById('gradeNowBtn').addEventListener('click', () => {
+  const modal = new bootstrap.Modal(document.getElementById('gradeModal'));
+  modal.show();
+});
+
+document.getElementById('startGradeBtn').addEventListener('click', async () => {
+  const backend = document.getElementById('backendSelect').value;
+  const prompt = document.getElementById('promptInput').value;
+  document.getElementById('startGradeBtn').disabled = true;
+  const r = await fetch('/api/grade', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({backend, prompt})
+  });
+  const j = await r.json();
+  if(r.ok) {
+    alert('Grading started — results saved. Refreshing.');
+    await fetch('/api/refresh');
+    loadAssignments();
+  } else {
+    alert('Error: ' + JSON.stringify(j));
+  }
+  document.getElementById('startGradeBtn').disabled = false;
+});
+
+loadAssignments();
+</script>
+{% endblock %}

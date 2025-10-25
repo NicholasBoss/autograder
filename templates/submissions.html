@@ -1,0 +1,256 @@
+{% extends "layout.html" %}
+
+{% block content %}
+    <script>
+        let assignments = [];
+        
+        async function loadAssignments(courseId) {
+            const assignmentSelect = document.getElementById("assignment_select");
+            const statusDiv = document.getElementById("status");
+            const fileUploadsOnly = document.getElementById("file_uploads_only");
+            
+            if (!courseId) {
+                assignmentSelect.innerHTML = '<option value="">Enter Course ID first</option>';
+                assignmentSelect.disabled = true;
+                return;
+            }
+            
+            try {
+                assignmentSelect.innerHTML = '<option value="">Loading assignments...</option>';
+                assignmentSelect.disabled = true;
+                
+                const filterParam = fileUploadsOnly && fileUploadsOnly.checked ? '&file_uploads_only=true' : '';
+                const response = await fetch(`/api/canvas/${courseId}/assignments?${filterParam}`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                assignments = await response.json();
+                
+                assignmentSelect.innerHTML = '<option value="">Select an assignment...</option>';
+                
+                if (assignments.length === 0) {
+                    const filterMsg = fileUploadsOnly && fileUploadsOnly.checked ? ' (with file uploads)' : '';
+                    assignmentSelect.innerHTML = `<option value="">No assignments available${filterMsg}</option>`;
+                    statusDiv.innerHTML = `<div class="status-message error">No assignments found in this course${filterMsg}.</div>`;
+                } else {
+                    assignments.forEach(assignment => {
+                        const option = document.createElement("option");
+                        option.value = assignment.id;
+                        
+                        // Show submission types in the option text
+                        const submissionTypes = assignment.submission_types || [];
+                        const hasFileUpload = submissionTypes.includes('online_upload') || submissionTypes.includes('media_recording');
+                        const typeIndicator = hasFileUpload ? ' 📁' : '';
+                        
+                        option.textContent = `${assignment.name}${typeIndicator}`;
+                        assignmentSelect.appendChild(option);
+                    });
+                    
+                    const filterMsg = fileUploadsOnly && fileUploadsOnly.checked ? ' (file uploads only)' : '';
+                    statusDiv.innerHTML = `<div class="status-message success">✅ Loaded ${assignments.length} assignments${filterMsg}</div>`;
+                }
+                
+                assignmentSelect.disabled = false;
+                
+            } catch (error) {
+                console.error("Error loading assignments:", error);
+                assignmentSelect.innerHTML = '<option value="">Error loading assignments</option>';
+                statusDiv.innerHTML = `<div class="status-message error">❌ Error loading assignments: ${error.message}</div>`;
+                assignmentSelect.disabled = false;
+            }
+        }
+        
+        function onCourseIdChange() {
+            const courseId = document.getElementById("course_id").value.trim();
+            
+            if (courseId) {
+                loadAssignments(courseId);
+            } else {
+                const assignmentSelect = document.getElementById("assignment_select");
+                assignmentSelect.innerHTML = '<option value="">Enter Course ID first</option>';
+                assignmentSelect.disabled = true;
+                document.getElementById("assignment_id").value = "";
+            }
+        }
+        
+        function onFilterChange() {
+            const courseId = document.getElementById("course_id").value.trim();
+            if (courseId) {
+                loadAssignments(courseId);
+            }
+        }
+        
+        function onAssignmentChange() {
+            const assignmentId = document.getElementById("assignment_select").value;
+            const manualAssignmentId = document.getElementById("assignment_id");
+            
+            manualAssignmentId.value = assignmentId;
+        }
+        
+        function syncAssignmentInput() {
+            const assignmentId = document.getElementById("assignment_id").value;
+            
+            // Update assignment dropdown if assignment ID is manually entered
+            if (assignmentId) {
+                const assignmentSelect = document.getElementById("assignment_select");
+                assignmentSelect.value = assignmentId;
+            }
+        }
+
+        async function fetchSubmissions() {
+            const courseId = document.getElementById("course_id").value.trim();
+            const assignmentId = document.getElementById("assignment_id").value.trim();
+            const statusDiv = document.getElementById("status");
+            const submitBtn = document.getElementById("submit_btn");
+            const resultsTable = document.getElementById("results");
+
+            if (!courseId || !assignmentId) {
+                statusDiv.innerHTML = '<div class="status-message error">❌ Please provide both Course ID and Assignment ID</div>';
+                return;
+            }
+
+            try {
+                submitBtn.disabled = true;
+                submitBtn.textContent = "Fetching...";
+                resultsTable.innerHTML = "";
+                statusDiv.innerHTML = '<div class="status-message loading">⏳ Fetching submissions...</div>';
+
+                const res = await fetch("/fetch_submissions", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ 
+                        course_id: courseId, 
+                        assignment_id: assignmentId,
+                        download_files: true
+                    })
+                });
+
+                const data = await res.json();
+
+                if (!res.ok) {
+                    throw new Error(data.error || `HTTP ${res.status}`);
+                }
+
+                if (data.success) {
+                    statusDiv.innerHTML = `
+                        <div class="status-message success">
+                            ✅ Successfully fetched ${data.total_students} submissions<br>
+                            📁 Downloaded ${data.total_downloads} files<br>
+                            ${data.failed_downloads > 0 ? `❌ ${data.failed_downloads} failed downloads<br>` : ''}
+                            📄 Manifest: ${data.manifest_file}
+                        </div>
+                    `;
+
+                    // Display submissions in table
+                    data.submissions.forEach((s, i) => {
+                        const row = document.createElement("tr");
+                        row.innerHTML = `
+                            <td>${i + 1}</td>
+                            <td>${s.user_id}</td>   
+                            <td>${s.attachment_count}</td>
+                            <td>${s.workflow_state}</td>
+                            <td>${s.has_body ? 'Yes' : 'No'}</td>
+                            <td><button class="btn" onclick="getFeedback('${s.user_id}', ${i})">Get Feedback</button></td>
+                            <td id="feedback-${i}"></td>
+                        `;
+                        resultsTable.appendChild(row);
+                    });
+
+                    window.submissionsData = data; // Store for feedback
+                } else {
+                    throw new Error(data.error || "Unknown error occurred");
+                }
+
+            } catch (error) {
+                console.error("Error fetching submissions:", error);
+                statusDiv.innerHTML = `<div class="status-message error">❌ Error: ${error.message}</div>`;
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.textContent = "Fetch Submissions";
+            }
+        }
+
+        async function getFeedback(userId, index) {
+            const feedbackCell = document.getElementById(`feedback-${index}`);
+            
+            try {
+                feedbackCell.textContent = "⏳ Getting feedback...";
+
+                // This would need to be implemented based on your feedback system
+                const res = await fetch("/get_feedback", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ user_id: userId })
+                });
+                
+                const data = await res.json();
+                feedbackCell.textContent = data.feedback || "❌ Error getting feedback.";
+                
+            } catch (error) {
+                feedbackCell.textContent = "❌ Error getting feedback.";
+            }
+        }
+
+        // Load assignments if course ID is already entered when page loads
+        window.addEventListener('load', function() {
+            const courseId = document.getElementById("course_id").value.trim();
+            if (courseId) {
+                loadAssignments(courseId);
+            }
+        });
+    </script>
+</head>
+<body>
+    <div class="submissions-manager">
+        <h1>Canvas Submissions Manager</h1>
+        
+        <div id="status"></div>
+        
+        <div class="submission-form">
+            <div class="form-group">
+                <label for="course_id" class="form-label">Course ID:</label>
+                <input type="text" id="course_id" class="form-control" placeholder="e.g. 12345" onchange="onCourseIdChange()">
+            </div>
+            
+            <div class="form-group">
+                <label for="assignment_select" class="form-label">Select Assignment:</label>
+                <div class="checkbox-container">
+                    <input type="checkbox" id="file_uploads_only" checked onchange="onFilterChange()">
+                    <label for="file_uploads_only" class="checkbox-label">Show only file upload assignments</label>
+                </div>
+                <select id="assignment_select" class="form-control" onchange="onAssignmentChange()" disabled>
+                    <option value="">Enter Course ID first</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <button id="submit_btn" class="fetch-btn" onclick="fetchSubmissions()">Fetch Submissions</button>
+            </div>
+        </div>
+        
+        <div class="manual-entry">
+            <h3>Manual Assignment ID Entry:</h3>
+            <div class="form-group">
+                <label for="assignment_id" class="form-label">Assignment ID:</label>
+                <input type="text" id="assignment_id" class="form-control" placeholder="e.g. 67890" onchange="syncAssignmentInput()">
+            </div>
+        </div>
+
+        <table class="submissions-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>User ID</th>
+                    <th>Files</th>
+                    <th>Status</th>
+                    <th>Has Text</th>
+                    <th>Action</th>
+                    <th>Feedback</th>
+                </tr>
+            </thead>
+            <tbody id="results"></tbody>
+        </table>
+    </div>
+{% endblock %}
