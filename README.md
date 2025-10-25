@@ -46,28 +46,6 @@ pip install -r requirements.txt
 
 -----
 
-### 🔄 Workflow
-
-#### Fetch Submissions
-
-You can sync submissions via the UI or using the command line:
-
-```bash
-python get_submissions.py
-```
-
-#### 🤖 Grade Work
-
-Start the grading process through the UI ("Grade Now") or via the CLI. Results are saved into `data/results.jsonl`.
-
-*CLI Grading Example:*
-
-```bash
-python app.py grade --backend openrouter --prompt "Score this out of 10."
-```
-
------
-
 ### 📊 Viewing Results
 
 The web dashboard provides different views for analyzing results:
