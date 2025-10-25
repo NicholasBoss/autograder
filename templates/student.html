@@ -1,0 +1,32 @@
+{% extends "layout.html" %}
+{% block content %}
+<h2>Students</h2>
+<div id="studentTable"></div>
+
+<script>
+async function loadStudents(){
+  const [manifestRes, resultsRes] = await Promise.all([fetch('/api/manifest'), fetch('/api/results')]);
+  const manifest = await manifestRes.json();
+  const results = await resultsRes.json();
+  const byStudent = {};
+  for(const m of manifest) {
+    const id = m.user_id;
+    byStudent[id] = {name: m.name, submissions: []};
+  }
+  for(const r of results) {
+    const id = r.user_id;
+    if(!byStudent[id]) byStudent[id] = {name: r.name||'Unknown', submissions: []};
+    byStudent[id].submissions.push(r);
+  }
+  let html = '<table class="table"><thead><tr><th>Student</th><th>#Submissions</th><th>Avg Score</th></tr></thead><tbody>';
+  for(const id in byStudent) {
+    const s = byStudent[id];
+    const avg = (s.submissions.reduce((a,b)=>a+(b.score||0),0)/Math.max(1,s.submissions.length)).toFixed(2);
+    html += `<tr><td>${s.name}</td><td>${s.submissions.length}</td><td>${avg}</td></tr>`;
+  }
+  html += '</tbody></table>';
+  document.getElementById('studentTable').innerHTML = html;
+}
+loadStudents();
+</script>
+{% endblock %}

@@ -1,0 +1,31 @@
+{% extends "layout.html" %}
+{% block content %}
+<h2>Performance</h2>
+<canvas id="trendChart" height="80"></canvas>
+
+<script>
+async function loadTrend(){
+  const res = await fetch('/api/results');
+  const rows = await res.json();
+  // sort by assignment id as label
+  const byAssign = {};
+  for(const r of rows) {
+    byAssign[r.assignment_id] = byAssign[r.assignment_id] || [];
+    if(typeof r.score === 'number') byAssign[r.assignment_id].push(r.score);
+  }
+  const labels = Object.keys(byAssign).sort();
+  const data = labels.map(k => {
+    const arr = byAssign[k];
+    if(!arr || !arr.length) return 0;
+    return arr.reduce((a,b)=>a+b,0)/arr.length;
+  });
+  const ctx = document.getElementById('trendChart').getContext('2d');
+  if(window.trendChart) window.trendChart.destroy();
+  window.trendChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [{ label: 'Avg Score', data }] }
+  });
+}
+loadTrend();
+</script>
+{% endblock %}

@@ -1,0 +1,53 @@
+{% extends "layout.html" %}
+{% block content %}
+<h2>Upload Answer Key</h2>
+<form method="post" enctype="multipart/form-data">
+  <div class="mb-3">
+    <label for="assignmentId" class="form-label"><b>Assignment ID</b></label>
+    <input class="form-control" type="text" id="assignmentId" name="assignment_id" placeholder="Enter assignment ID (e.g., 12345)" required>
+    <div class="form-text">This will create the answer key in downloads/assignment_{id}/answer_key/</div>
+  </div>
+  
+  <div class="mb-3">
+    <label for="answerKeyFile" class="form-label"><b>Select Answer Key File</b></label>
+    <input class="form-control" type="file" id="answerKeyFile" name="answer_key_file" required>
+    <div class="form-text">Upload any file type (.py, .txt, .pdf, etc.)</div>
+  </div>
+  
+  <button class="btn btn-primary" type="submit">Upload Answer Key</button>
+</form>
+
+{% if existing_answer_keys %}
+<hr>
+<h5>Existing Answer Keys</h5>
+<div class="row">
+  {% for key in existing_answer_keys %}
+  <div class="col-md-6 mb-3">
+    <div class="card">
+      <div class="card-body">
+        <h6 class="card-title">Assignment {{ key.assignment_id }}</h6>
+        <p class="card-text">
+          <strong>{{ key.filename }}</strong><br>
+          <small class="text-muted">
+            Size: {{ key.size }} bytes<br>
+            Modified: {{ key.modified }}<br>
+            Path: downloads/assignment_{{ key.assignment_id }}/answer_key/
+          </small>
+        </p>
+        <div>
+          <span class="badge bg-success">Assignment {{ key.assignment_id }}</span>
+          <a href="{{ url_for('download_answer_key', assignment_id=key.assignment_id, filename=key.filename) }}" class="btn btn-sm btn-outline-primary ms-2">Download</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<hr>
+<div class="alert alert-info">
+  <h6>No answer keys uploaded yet</h6>
+  <p class="mb-0">Upload answer keys for specific assignments using the form above.</p>
+</div>
+{% endif %}
+{% endblock %}
