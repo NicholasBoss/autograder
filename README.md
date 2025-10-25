@@ -81,26 +81,6 @@ You can click on items within the dashboard to drill down and see individual stu
 
 -----
 
-### 📑 Answer Key (Optional)
-
-You can upload an answer key file via the UI to enable basic scoring based on expected content.
-
-*Example Answer Key Format:*
-
-```json
-{
-  "questions": [
-    {
-      "id": "Q1",
-      "max_score": 10,
-      "keywords": ["motion", "force"]
-    }
-  ]
-}
-```
-
------
-
 ### ❤️ Built for Teachers
 
 AutoMark is a tool built to **help teachers save hours** and provide more detailed feedback. If you have ideas, feedback, or need help extending the tool, feel free to reach out\!
