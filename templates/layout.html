@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Canvas Autograder Suite</title>
+    <link rel="icon" type="image/x-icon" href="{{ url_for('static', filename='images/favicon.ico') }}">
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -11,7 +12,10 @@
   <body>
     <nav class="navbar">
       <div class="container navbar-container">
-        <a class="navbar-brand" href="{{ url_for('index') }}">Canvas Autograder</a>
+        <a class="navbar-brand" href="{{ url_for('index') }}">
+          <img src="{{ url_for('static', filename='images/automark-logo-transparent.png') }}" alt="Logo" class="navbar-logo">
+          AutoMark
+        </a>
         <button class="navbar-toggle" id="navToggle">☰</button>
         <div class="navbar-nav" id="navLinks">
           <a class="nav-link {% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index') }}">Dashboard</a>
