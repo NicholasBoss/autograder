@@ -1,32 +1,75 @@
 {% extends "layout.html" %}
 {% block content %}
 <h2>Students</h2>
-<div id="studentTable"></div>
+<div class="card">
+  <div class="card-body">
+    <div id="studentTableContainer">
+      <table class="students-table" id="studentsTable">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>User ID</th>
+            <th># Submissions</th>
+            <th>Avg Score</th>
+            <th>Last Submission</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="studentsBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
 
 <script>
 async function loadStudents(){
   const [manifestRes, resultsRes] = await Promise.all([fetch('/api/manifest'), fetch('/api/results')]);
   const manifest = await manifestRes.json();
   const results = await resultsRes.json();
-  const byStudent = {};
-  for(const m of manifest) {
-    const id = m.user_id;
-    byStudent[id] = {name: m.name, submissions: []};
+
+  // Group by student id
+  const students = {};
+  for (const m of manifest) {
+    const id = m.user_id || m.user_id || 'unknown';
+    const name = m.user_name || m.user_name || m.user || m.user_name || m.display_name || 'Unknown';
+    students[id] = students[id] || { user_id: id, user_name: name, submissions: [], lastSubmitted: null };
+    // Use submitted_at from manifest if present
+    if (m.submitted_at) {
+      const d = new Date(m.submitted_at);
+      if (!students[id].lastSubmitted || d > students[id].lastSubmitted) students[id].lastSubmitted = d;
+    }
   }
-  for(const r of results) {
-    const id = r.user_id;
-    if(!byStudent[id]) byStudent[id] = {name: r.name||'Unknown', submissions: []};
-    byStudent[id].submissions.push(r);
+
+  for (const r of results) {
+    const id = r.user_id || r.user_id || 'unknown';
+    students[id] = students[id] || { user_id: id, user_name: r.user_name || r.user || 'Unknown', submissions: [], lastSubmitted: null };
+    students[id].submissions.push(r);
+    if (r.submitted_at) {
+      const d = new Date(r.submitted_at);
+      if (!students[id].lastSubmitted || d > students[id].lastSubmitted) students[id].lastSubmitted = d;
+    }
   }
-  let html = '<table class="table"><thead><tr><th>Student</th><th>#Submissions</th><th>Avg Score</th></tr></thead><tbody>';
-  for(const id in byStudent) {
-    const s = byStudent[id];
-    const avg = (s.submissions.reduce((a,b)=>a+(b.score||0),0)/Math.max(1,s.submissions.length)).toFixed(2);
-    html += `<tr><td>${s.name}</td><td>${s.submissions.length}</td><td>${avg}</td></tr>`;
-  }
-  html += '</tbody></table>';
-  document.getElementById('studentTable').innerHTML = html;
+
+  const tbody = document.getElementById('studentsBody');
+  tbody.innerHTML = '';
+  let idx = 1;
+  Object.values(students).sort((a,b)=> (b.submissions.length||0) - (a.submissions.length||0)).forEach(s => {
+    const avg = (s.submissions.reduce((a,b)=>a+(b.score||0),0) / Math.max(1, s.submissions.length)).toFixed(2);
+    const last = s.lastSubmitted ? s.lastSubmitted.toLocaleString() : '-';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${idx}</td>
+      <td>${s.user_id}</td>
+      <td style="text-align:center">${s.submissions.length || 0}</td>
+      <td style="text-align:center">${avg}</td>
+      <td>${last}</td>
+      <td style="text-align:center"><a class="btn btn-accent" href="${location.origin + '/submissions'}">View</a></td>
+    `;
+    tbody.appendChild(tr);
+    idx += 1;
+  });
 }
+
 loadStudents();
 </script>
 {% endblock %}
