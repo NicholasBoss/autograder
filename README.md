@@ -29,7 +29,6 @@ pip install -r requirements.txt
 1.  Start the Flask web application:
 
     ```bash
-    export FLASK_APP=app.py
     flask run
     ```
 
