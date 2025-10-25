@@ -3,8 +3,9 @@ import os
 import json
 import time
 import re
+import uuid
 from typing import Optional
-from flask import Flask, render_template, request, redirect, url_for, jsonify, flash, send_from_directory
+from flask import Flask, render_template, request, redirect, url_for, jsonify, flash, send_from_directory, Response
 from dotenv import load_dotenv, set_key, dotenv_values
 from pathlib import Path
 import requests
@@ -55,6 +56,9 @@ def load_env():
     return env
 
 CONFIG = load_env()
+
+# Progress tracking for grading sessions
+GRADING_PROGRESS = {}  # Format: {session_id: {"total": N, "completed": N, "current_user": str, "results": []}}
 
 # Helpers to call Canvas endpoints
 def _canvas_get(path, params=None):
@@ -918,16 +922,13 @@ def upload_answer_key():
         assignment_id = request.form.get("assignment_id", "").strip()
         
         if not uploaded_file or uploaded_file.filename == '':
-            flash("No file selected for upload", "danger")
-            return redirect(url_for("upload_answer_key"))
+            return jsonify({"success": False, "error": "No file selected for upload"}), 400
         
         if not assignment_id:
-            flash("Assignment ID is required", "danger")
-            return redirect(url_for("upload_answer_key"))
+            return jsonify({"success": False, "error": "Assignment ID is required"}), 400
         
         if not course_id:
-            flash("Course ID is required", "danger")
-            return redirect(url_for("upload_answer_key"))
+            return jsonify({"success": False, "error": "Course ID is required"}), 400
         
         # Create course and assignment-specific answer key directory and questions directory
         course_dir = base_download_dir / f"course_{course_id}"
@@ -949,17 +950,21 @@ def upload_answer_key():
             with open(key_file, "wb") as fo:
                 fo.write(uploaded_file.read())
             
-            flash(f"Answer key successfully uploaded for Course {course_id}, Assignment {assignment_id} as {safe_filename}", "success")
             print(f"✅ Answer key saved to: {key_file}")
             
-            return redirect(url_for("index"))
+            return jsonify({
+                "success": True, 
+                "message": f"Answer key successfully uploaded",
+                "course_id": course_id,
+                "assignment_id": assignment_id,
+                "filename": safe_filename,
+                "file_path": str(key_file)
+            })
             
         except UnicodeDecodeError:
-            flash("File encoding error. Please ensure the file is UTF-8 encoded", "danger")
-            return redirect(url_for("upload_answer_key"))
+            return jsonify({"success": False, "error": "File encoding error"}), 400
         except Exception as e:
-            flash(f"Error processing file: {str(e)}", "danger")
-            return redirect(url_for("upload_answer_key"))
+            return jsonify({"success": False, "error": f"Error processing file: {str(e)}"}), 500
     
     # GET request - show upload form
     # Look for existing answer key files across all assignments
@@ -1313,11 +1318,29 @@ def download_answer_key_with_course(course_id, assignment_id, filename):
 
 @APP.route("/api/available-courses", methods=["GET"])
 def api_get_available_courses():
-    """Get list of courses that have assignments with data."""
+    """Get list of courses that have assignments with data, with course names from Canvas."""
     try:
         cfg = load_env()
         base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
         courses = []
+        course_map = {}  # Store by course_id for deduplication
+        
+        # Try to fetch course names from Canvas
+        canvas_courses_map = {}
+        try:
+            api_url = cfg.get("CANVAS_API_URL", DEFAULTS["CANVAS_API_URL"])
+            api_token = cfg.get("CANVAS_API_TOKEN", "")
+            if api_url and api_token:
+                headers = {"Authorization": f"Bearer {api_token}"}
+                resp = requests.get(f"{api_url.rstrip('/')}/api/v1/courses", headers=headers, timeout=10, params={"per_page": 100})
+                if resp.status_code == 200:
+                    for course in resp.json():
+                        course_id = str(course.get("id", ""))
+                        # Use only the original course name (not nickname)
+                        course_name = course.get("name") or course.get("course_code", f"Course {course_id}")
+                        canvas_courses_map[course_id] = course_name
+        except Exception as canvas_err:
+            print(f"Note: Could not fetch Canvas courses: {canvas_err}")
         
         if base_download_dir.exists():
             for course_folder in base_download_dir.iterdir():
@@ -1331,48 +1354,79 @@ def api_get_available_courses():
                             assignment_count += 1
                     
                     if assignment_count > 0:
-                        courses.append({
+                        # Get course name from Canvas or use ID
+                        course_name = canvas_courses_map.get(course_id, f"Course {course_id}")
+                        course_map[course_id] = {
                             "course_id": course_id,
+                            "course_name": course_name,
                             "assignment_count": assignment_count
-                        })
+                        }
+        
+        # Convert map to list, avoiding duplicates
+        courses = list(course_map.values())
         
         # Also check for legacy assignment folders (without course prefix)
-        for assignment_folder in base_download_dir.iterdir():
-            if assignment_folder.is_dir() and assignment_folder.name.startswith("assignment_"):
-                assignment_id = assignment_folder.name.replace("assignment_", "")
-                # Add as "Unknown Course" if not already in a course folder
-                courses.append({
-                    "course_id": "unknown",
-                    "assignment_count": 1,
-                    "legacy": True,
-                    "assignment_id": assignment_id
-                })
+        legacy_courses = []
+        if base_download_dir.exists():
+            for assignment_folder in base_download_dir.iterdir():
+                if assignment_folder.is_dir() and assignment_folder.name.startswith("assignment_"):
+                    assignment_id = assignment_folder.name.replace("assignment_", "")
+                    # Add as "Unknown Course" if not already in a course folder
+                    legacy_courses.append({
+                        "course_id": "unknown",
+                        "course_name": "Legacy Assignments",
+                        "assignment_count": 1,
+                        "legacy": True,
+                        "assignment_id": assignment_id
+                    })
         
+        courses.extend(legacy_courses)
         return jsonify({"courses": courses})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @APP.route("/api/course-assignments-with-questions/<course_id>", methods=["GET"])
 def api_get_course_assignments_with_questions(course_id):
-    """Get assignments with parsed questions for a specific course."""
+    """Get assignments with parsed questions for a specific course, with names from Canvas."""
     try:
         cfg = load_env()
         base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
         assignments = []
+        assignment_map = {}  # Store by assignment_id for deduplication
+        
+        # Try to fetch assignment names from Canvas
+        canvas_assignments_map = {}
+        try:
+            api_url = cfg.get("CANVAS_API_URL", DEFAULTS["CANVAS_API_URL"])
+            api_token = cfg.get("CANVAS_API_TOKEN", "")
+            if api_url and api_token and course_id != "unknown":
+                headers = {"Authorization": f"Bearer {api_token}"}
+                resp = requests.get(f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/assignments", 
+                                   headers=headers, timeout=10, params={"per_page": 100})
+                if resp.status_code == 200:
+                    for assignment in resp.json():
+                        assignment_id = str(assignment.get("id", ""))
+                        # Use assignment name as the display name
+                        assignment_name = assignment.get("name", f"Assignment {assignment_id}")
+                        canvas_assignments_map[assignment_id] = assignment_name
+        except Exception as canvas_err:
+            print(f"Note: Could not fetch Canvas assignments: {canvas_err}")
         
         if course_id == "unknown":
             # Handle legacy assignment folders
-            for assignment_folder in base_download_dir.iterdir():
-                if assignment_folder.is_dir() and assignment_folder.name.startswith("assignment_"):
-                    assignment_id = assignment_folder.name.replace("assignment_", "")
-                    questions_dir = assignment_folder / "questions"
-                    has_questions = questions_dir.exists() and any(f.suffix == '.md' for f in questions_dir.iterdir() if f.is_file())
-                    
-                    assignments.append({
-                        "assignment_id": assignment_id,
-                        "has_questions": has_questions,
-                        "legacy": True
-                    })
+            if base_download_dir.exists():
+                for assignment_folder in base_download_dir.iterdir():
+                    if assignment_folder.is_dir() and assignment_folder.name.startswith("assignment_"):
+                        assignment_id = assignment_folder.name.replace("assignment_", "")
+                        questions_dir = assignment_folder / "questions"
+                        has_questions = questions_dir.exists() and any(f.suffix == '.md' for f in questions_dir.iterdir() if f.is_file())
+                        
+                        assignments.append({
+                            "assignment_id": assignment_id,
+                            "assignment_name": f"Assignment {assignment_id}",
+                            "has_questions": has_questions,
+                            "legacy": True
+                        })
         else:
             # Handle course-specific folders
             course_dir = base_download_dir / f"course_{course_id}"
@@ -1383,10 +1437,16 @@ def api_get_course_assignments_with_questions(course_id):
                         questions_dir = assignment_folder / "questions"
                         has_questions = questions_dir.exists() and any(f.suffix == '.md' for f in questions_dir.iterdir() if f.is_file())
                         
-                        assignments.append({
+                        # Get assignment name from Canvas or use ID
+                        assignment_name = canvas_assignments_map.get(assignment_id, f"Assignment {assignment_id}")
+                        assignment_map[assignment_id] = {
                             "assignment_id": assignment_id,
+                            "assignment_name": assignment_name,
                             "has_questions": has_questions
-                        })
+                        }
+                
+                # Convert map to list, avoiding duplicates
+                assignments = list(assignment_map.values())
         
         return jsonify({"assignments": assignments})
     except Exception as e:
@@ -1520,7 +1580,7 @@ def api_compare_submissions():
     data = request.get_json()
     assignment_id = data.get("assignment_id")
     course_id = data.get("course_id")
-    max_workers = data.get("max_workers", 5)  # Allow customization, default to 5 parallel workers
+    max_workers = data.get("max_workers", 10)  # Increased default to 10 for better throughput
     
     if not assignment_id:
         return jsonify({"error": "assignment_id is required"}), 400
@@ -1529,6 +1589,24 @@ def api_compare_submissions():
         cfg = load_env()
         data_dir = Path(cfg.get("DATA_DIR", DEFAULTS["DATA_DIR"]))
         base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+        
+        # Get assignment points from Canvas API
+        points_possible = 100  # Default fallback
+        try:
+            api_url = cfg.get("CANVAS_API_URL", DEFAULTS["CANVAS_API_URL"])
+            api_token = cfg.get("CANVAS_API_TOKEN", "")
+            if api_url and api_token and course_id and course_id != "unknown":
+                headers = {"Authorization": f"Bearer {api_token}"}
+                resp = requests.get(
+                    f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/assignments/{assignment_id}",
+                    headers=headers,
+                    timeout=10
+                )
+                if resp.status_code == 200:
+                    points_possible = resp.json().get("points_possible", 100)
+                    print(f"✅ Assignment {assignment_id} is worth {points_possible} points")
+        except Exception as canvas_err:
+            print(f"Note: Could not fetch assignment points from Canvas: {canvas_err}")
         
         # Determine the correct manifest path based on course_id
         if course_id and course_id != "unknown":
@@ -1612,7 +1690,7 @@ def api_compare_submissions():
         print(f"🔄 Starting parallel grading of {len(submissions_to_grade)} submissions with {max_workers} workers...")
         
         def grade_single_submission(submission_data):
-            """Grade a single submission using OpenRouter API."""
+            """Grade a single submission using OpenRouter API with rate limiting."""
             user_id = submission_data["user_id"]
             user_name = submission_data["user_name"]
             student_text = submission_data["student_text"]
@@ -1623,6 +1701,7 @@ def api_compare_submissions():
                     "user_name": user_name,
                     "error": "No readable submission content found",
                     "score": 0,
+                    "points": 0,
                     "feedback": "Could not read submission"
                 }
             
@@ -1667,6 +1746,20 @@ FEEDBACK: [Your detailed feedback explaining the score, what was correct, what w
                     timeout=120
                 )
                 
+                if response.status_code == 429:
+                    # Rate limited - wait and retry
+                    print(f"  ⏱️  Rate limited for {user_id}, retrying...")
+                    time.sleep(2)
+                    response = requests.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {openrouter_api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json=payload,
+                        timeout=120
+                    )
+                
                 if response.status_code != 200:
                     print(f"  ❌ OpenRouter error for {user_id}: {response.status_code}")
                     return {
@@ -1674,33 +1767,39 @@ FEEDBACK: [Your detailed feedback explaining the score, what was correct, what w
                         "user_name": user_name,
                         "error": f"OpenRouter API error: {response.text}",
                         "score": 0,
+                        "points": 0,
                         "feedback": "Failed to grade submission"
                     }
                 
                 response_text = response.json()["choices"][0]["message"]["content"]
                 
                 # Extract score and feedback from response
-                score = 0
+                score_percentage = 0
                 feedback = response_text
                 
                 # Try to extract score from response
                 score_match = re.search(r'SCORE:\s*(\d+)', response_text, re.IGNORECASE)
                 if score_match:
-                    score = int(score_match.group(1))
+                    score_percentage = int(score_match.group(1))
                     # Clamp score between 0 and 100
-                    score = max(0, min(100, score))
+                    score_percentage = max(0, min(100, score_percentage))
                 
                 # Extract feedback section
                 feedback_match = re.search(r'FEEDBACK:\s*(.+?)(?:$)', response_text, re.IGNORECASE | re.DOTALL)
                 if feedback_match:
                     feedback = feedback_match.group(1).strip()
                 
-                print(f"  ✅ {user_id}: Score {score}/100")
+                # Convert percentage to actual points based on assignment worth
+                actual_points = (score_percentage / 100.0) * points_possible
+                
+                print(f"  ✅ {user_id}: {score_percentage}% = {actual_points:.2f}/{points_possible} points")
                 
                 return {
                     "user_id": user_id,
                     "user_name": user_name,
-                    "score": score,
+                    "score": score_percentage,
+                    "points": round(actual_points, 2),
+                    "points_possible": points_possible,
                     "feedback": feedback,
                     "full_response": response_text
                 }
@@ -1712,16 +1811,28 @@ FEEDBACK: [Your detailed feedback explaining the score, what was correct, what w
                     "user_name": user_name,
                     "error": f"Grading error: {str(e)}",
                     "score": 0,
+                    "points": 0,
+                    "points_possible": points_possible,
                     "feedback": "Failed to grade submission"
                 }
         
-        # Use ThreadPoolExecutor for parallel processing
+        # Use ThreadPoolExecutor for parallel processing with rate limiting
         comparison_results = []
         start_time = time.time()
         
+        # Rate limiting: stagger submissions based on worker count
+        # For 10 workers, add ~0.5s delay between submissions to avoid rate limits
+        submission_delay = 0.5 if max_workers >= 10 else 0.2
+        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_submission = {executor.submit(grade_single_submission, sub): sub for sub in submissions_to_grade}
+            # Submit all tasks with staggered timing to avoid rate limits
+            future_to_submission = {}
+            for i, sub in enumerate(submissions_to_grade):
+                # Stagger submission of tasks
+                delay = i * submission_delay
+                time.sleep(min(delay, 0.1))  # Don't sleep more than 0.1s per submission
+                future = executor.submit(grade_single_submission, sub)
+                future_to_submission[future] = sub
             
             # Collect results as they complete
             for future in as_completed(future_to_submission):
@@ -1743,7 +1854,8 @@ FEEDBACK: [Your detailed feedback explaining the score, what was correct, what w
         # Calculate summary statistics
         total_students = len(comparison_results)
         successful_grades = [r for r in comparison_results if "score" in r and "error" not in r]
-        avg_score = sum(r.get("score", 0) for r in successful_grades) / len(successful_grades) if successful_grades else 0
+        avg_percentage = sum(r.get("score", 0) for r in successful_grades) / len(successful_grades) if successful_grades else 0
+        avg_points = sum(r.get("points", 0) for r in successful_grades) / len(successful_grades) if successful_grades else 0
         failed_count = total_students - len(successful_grades)
         
         summary = {
@@ -1752,12 +1864,16 @@ FEEDBACK: [Your detailed feedback explaining the score, what was correct, what w
             "total_students": total_students,
             "successfully_graded": len(successful_grades),
             "failed_to_grade": failed_count,
-            "average_score": round(avg_score, 2),
+            "average_percentage": round(avg_percentage, 2),
+            "average_points": round(avg_points, 2),
+            "points_possible": points_possible,
             "results_file": str(results_file),
+            "processing_time_seconds": round(elapsed_time, 2),
+            "workers_used": max_workers,
             "comparison_results": comparison_results
         }
         
-        print(f"✅ Comparison complete: {total_students} students, {len(successful_grades)} graded, {avg_score:.1f}% avg score")
+        print(f"✅ Comparison complete: {total_students} students, {len(successful_grades)} graded, {avg_percentage:.1f}% avg ({avg_points:.2f}/{points_possible} pts)")
         
         return jsonify(summary)
         
@@ -1766,6 +1882,284 @@ FEEDBACK: [Your detailed feedback explaining the score, what was correct, what w
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+@APP.route("/api/compare-submissions-stream", methods=["POST"])
+def api_compare_submissions_stream():
+    """Stream comparison progress to client using Server-Sent Events."""
+    data = request.get_json()
+    assignment_id = data.get("assignment_id")
+    course_id = data.get("course_id")
+    max_workers = data.get("max_workers", 10)
+    
+    if not assignment_id:
+        return jsonify({"error": "assignment_id is required"}), 400
+    
+    # Generate a unique session ID for this grading task
+    import uuid
+    session_id = str(uuid.uuid4())[:8]
+    
+    def generate_events():
+        """Generator function for Server-Sent Events."""
+        try:
+            cfg = load_env()
+            data_dir = Path(cfg.get("DATA_DIR", DEFAULTS["DATA_DIR"]))
+            base_download_dir = Path(cfg.get("CANVAS_DOWNLOAD_DIR", "./data/downloads"))
+            
+            # Get assignment points from Canvas API
+            points_possible = 100
+            try:
+                api_url = cfg.get("CANVAS_API_URL", DEFAULTS["CANVAS_API_URL"])
+                api_token = cfg.get("CANVAS_API_TOKEN", "")
+                if api_url and api_token and course_id and course_id != "unknown":
+                    headers = {"Authorization": f"Bearer {api_token}"}
+                    resp = requests.get(
+                        f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/assignments/{assignment_id}",
+                        headers=headers,
+                        timeout=10
+                    )
+                    if resp.status_code == 200:
+                        points_possible = resp.json().get("points_possible", 100)
+            except Exception as canvas_err:
+                print(f"Note: Could not fetch assignment points: {canvas_err}")
+            
+            # Get parsed questions
+            parsed_questions_content = None
+            if course_id and course_id != "unknown":
+                parsed_questions_content = get_parsed_questions_content_with_course(course_id, assignment_id)
+            
+            if not parsed_questions_content:
+                parsed_questions_content = get_parsed_questions_content(assignment_id)
+            
+            if not parsed_questions_content:
+                parsed_questions_content = get_answer_key_content(assignment_id)
+            
+            if not parsed_questions_content:
+                yield f"data: {json.dumps({'error': 'No answer key or parsed questions found'})}\n\n"
+                return
+            
+            # Determine manifest path
+            if course_id and course_id != "unknown":
+                manifest_path = data_dir / f"submissions_manifest_course_{course_id}_assignment_{assignment_id}.jsonl"
+                if not manifest_path.exists():
+                    manifest_path = data_dir / f"submissions_manifest_assignment_{assignment_id}.jsonl"
+            else:
+                manifest_path = data_dir / f"submissions_manifest_assignment_{assignment_id}.jsonl"
+            
+            if not manifest_path.exists():
+                yield f"data: {json.dumps({'error': f'No submissions manifest found'})}\n\n"
+                return
+            
+            # Load submissions
+            submissions_to_grade = []
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        submission = json.loads(line)
+                        user_id = submission.get("user_id")
+                        user_name = submission.get("user_name", f"User_{user_id}")
+                        
+                        student_text = ""
+                        if submission.get("has_body") and submission.get("body_text"):
+                            student_text = submission.get("body_text", "")
+                        else:
+                            attachments = submission.get("attachments", [])
+                            for attachment in attachments:
+                                saved_path = attachment.get("saved_path")
+                                if saved_path and Path(saved_path).exists():
+                                    try:
+                                        with open(saved_path, 'r', encoding='utf-8') as af:
+                                            student_text = af.read()
+                                            break
+                                    except Exception:
+                                        continue
+                        
+                        submissions_to_grade.append({
+                            "user_id": user_id,
+                            "user_name": user_name,
+                            "student_text": student_text
+                        })
+                    except Exception:
+                        continue
+            
+            total_students = len(submissions_to_grade)
+            yield f"data: {json.dumps({'type': 'start', 'total': total_students, 'points_possible': points_possible})}\n\n"
+            
+            # Get OpenRouter credentials
+            openrouter_api_key = cfg.get("OPENROUTER_API_KEY")
+            openrouter_model = cfg.get("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+            
+            if not openrouter_api_key:
+                yield f"data: {json.dumps({'error': 'OpenRouter API key not configured'})}\n\n"
+                return
+            
+            completed = 0
+            results = []
+            
+            def grade_submission_wrapper(submission_data):
+                """Wrapper to grade and yield progress."""
+                nonlocal completed
+                user_id = submission_data["user_id"]
+                user_name = submission_data["user_name"]
+                student_text = submission_data["student_text"]
+                
+                if not student_text:
+                    result = {
+                        "user_id": user_id,
+                        "user_name": user_name,
+                        "error": "No readable submission content",
+                        "score": 0,
+                        "points": 0
+                    }
+                else:
+                    # Grade using OpenRouter
+                    comparison_prompt = f"""You are an expert grader. Compare the student's submission to the answer key/expected answers and provide a score.
+
+ANSWER KEY / EXPECTED ANSWERS:
+{parsed_questions_content}
+
+---
+
+STUDENT'S SUBMISSION:
+{student_text}
+
+---
+
+EVALUATION INSTRUCTIONS:
+1. Carefully compare the student's submission to the expected answers
+2. Evaluate if the student's answers are conceptually correct even if worded differently
+3. Look for equivalent solutions and acceptable variations
+4. Provide a score from 0-100 based on accuracy and completeness
+5. Explain your reasoning and identify any errors or missing concepts
+
+Please provide your response in this format:
+SCORE: [0-100]
+FEEDBACK: [Your detailed feedback explaining the score, what was correct, what was missing, and suggestions for improvement]
+"""
+                    
+                    try:
+                        payload = {
+                            "model": openrouter_model,
+                            "messages": [{"role": "user", "content": comparison_prompt}]
+                        }
+                        
+                        response = requests.post(
+                            "https://openrouter.ai/api/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {openrouter_api_key}",
+                                "Content-Type": "application/json"
+                            },
+                            json=payload,
+                            timeout=120
+                        )
+                        
+                        if response.status_code == 429:
+                            time.sleep(2)
+                            response = requests.post(
+                                "https://openrouter.ai/api/v1/chat/completions",
+                                headers={
+                                    "Authorization": f"Bearer {openrouter_api_key}",
+                                    "Content-Type": "application/json"
+                                },
+                                json=payload,
+                                timeout=120
+                            )
+                        
+                        if response.status_code != 200:
+                            result = {
+                                "user_id": user_id,
+                                "user_name": user_name,
+                                "error": f"OpenRouter API error: {response.status_code}",
+                                "score": 0,
+                                "points": 0
+                            }
+                        else:
+                            response_text = response.json()["choices"][0]["message"]["content"]
+                            score_percentage = 0
+                            feedback = response_text
+                            
+                            score_match = re.search(r'SCORE:\s*(\d+)', response_text, re.IGNORECASE)
+                            if score_match:
+                                score_percentage = int(score_match.group(1))
+                                score_percentage = max(0, min(100, score_percentage))
+                            
+                            feedback_match = re.search(r'FEEDBACK:\s*(.+?)(?:$)', response_text, re.IGNORECASE | re.DOTALL)
+                            if feedback_match:
+                                feedback = feedback_match.group(1).strip()
+                            
+                            actual_points = (score_percentage / 100.0) * points_possible
+                            
+                            result = {
+                                "user_id": user_id,
+                                "user_name": user_name,
+                                "score": score_percentage,
+                                "points": round(actual_points, 2),
+                                "points_possible": points_possible,
+                                "feedback": feedback,
+                                "full_response": response_text
+                            }
+                    except Exception as e:
+                        result = {
+                            "user_id": user_id,
+                            "user_name": user_name,
+                            "error": f"Grading error: {str(e)}",
+                            "score": 0,
+                            "points": 0
+                        }
+                
+                return result
+            
+            # Grade with parallel processing and stream results
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                for i, sub in enumerate(submissions_to_grade):
+                    time.sleep(0.1)  # Small delay to stagger submissions
+                    future = executor.submit(grade_submission_wrapper, sub)
+                    futures.append((future, sub.get("user_id"), sub.get("user_name")))
+                
+                for future, user_id, user_name in futures:
+                    result = future.result()
+                    results.append(result)
+                    completed += 1
+                    
+                    # Stream progress update
+                    score = result.get("score", 0)
+                    points = result.get("points", 0)
+                    yield f"data: {json.dumps({'type': 'progress', 'completed': completed, 'total': total_students, 'current': f'{user_id} - {score}%', 'score': score, 'points': points})}\n\n"
+            
+            # Save results
+            if course_id and course_id != "unknown":
+                results_file = data_dir / f"comparison_results_course_{course_id}_assignment_{assignment_id}.jsonl"
+            else:
+                results_file = data_dir / f"comparison_results_assignment_{assignment_id}.jsonl"
+            
+            with open(results_file, 'w', encoding='utf-8') as f:
+                for result in results:
+                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
+            
+            # Calculate summary
+            successful_grades = [r for r in results if "score" in r and "error" not in r]
+            avg_percentage = sum(r.get("score", 0) for r in successful_grades) / len(successful_grades) if successful_grades else 0
+            avg_points = sum(r.get("points", 0) for r in successful_grades) / len(successful_grades) if successful_grades else 0
+            
+            # Build complete event with proper JSON encoding
+            complete_event = {
+                'type': 'complete',
+                'total': total_students,
+                'successful': len(successful_grades),
+                'average_percentage': round(avg_percentage, 2),
+                'average_points': round(avg_points, 2),
+                'points_possible': points_possible,
+                'results': results
+            }
+            yield f"data: {json.dumps(complete_event, ensure_ascii=False)}\n\n"
+            
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+    
+    return Response(generate_events(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no"
+    })
 
 @APP.route("/api/comparison-results/<assignment_id>", methods=["GET"])
 def api_get_comparison_results(assignment_id):
@@ -1798,6 +2192,58 @@ def api_get_comparison_results(assignment_id):
             "assignment_id": assignment_id,
             "total_students": total_students,
             "total_questions": total_questions,
+            "average_score": round(avg_score, 2),
+            "results": results
+        }
+        
+        return jsonify(summary)
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@APP.route("/api/comparison-results/<course_id>/<assignment_id>", methods=["GET"])
+def api_get_comparison_results_with_course(course_id, assignment_id):
+    """Get comparison results for a specific course and assignment."""
+    try:
+        cfg = load_env()
+        data_dir = Path(cfg.get("DATA_DIR", DEFAULTS["DATA_DIR"]))
+        
+        # Try course-specific file first
+        results_file = data_dir / f"comparison_results_course_{course_id}_assignment_{assignment_id}.jsonl"
+        
+        # Fall back to legacy file if course-specific doesn't exist
+        if not results_file.exists():
+            results_file = data_dir / f"comparison_results_assignment_{assignment_id}.jsonl"
+        
+        if not results_file.exists():
+            return jsonify({"error": f"No comparison results found for course {course_id}, assignment {assignment_id}"}), 404
+        
+        results = []
+        with open(results_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    results.append(json.loads(line))
+                except Exception:
+                    continue
+        
+        # Calculate summary statistics
+        total_students = len(results)
+        if total_students == 0:
+            return jsonify({"error": "No results found"}), 404
+        
+        # Get average score (handle both 'score' and 'score_percentage' fields)
+        scores = []
+        for r in results:
+            score = r.get("score", r.get("score_percentage", 0))
+            if score > 0 or "error" not in r:
+                scores.append(score)
+        
+        avg_score = (sum(scores) / len(scores)) if scores else 0
+        
+        summary = {
+            "course_id": course_id,
+            "assignment_id": assignment_id,
+            "total_students": total_students,
             "average_score": round(avg_score, 2),
             "results": results
         }

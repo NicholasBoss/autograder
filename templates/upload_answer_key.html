@@ -2,21 +2,9 @@
 {% block content %}
 <h2>Upload Answer Key</h2>
 
-{% with messages = get_flashed_messages(with_categories=True) %}
-  {% if messages %}
-    {% for category, message in messages %}
-      <div class="alert alert-{{ 'success' if category == 'success' else 'danger' }} alert-dismissible fade show" role="alert">
-        {{ message }}
-        {% if category == 'success' and 'successfully uploaded' in message %}
-          <br><small>💡 <strong>Tip:</strong> You can now parse questions from your answer key using the "Parse Questions" button below!</small>
-        {% endif %}
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-      </div>
-    {% endfor %}
-  {% endif %}
-{% endwith %}
+<div id="uploadStatus" class="mb-4"></div>
 
-<form method="post" enctype="multipart/form-data">
+<form id="answerKeyForm" enctype="multipart/form-data">
   <div class="row">
     <div class="col-md-6">
       <div class="mb-3">
@@ -65,8 +53,245 @@
     <div class="form-text">Upload any file type (.py, .txt, .pdf, etc.)</div>
   </div>
   
+  <div class="form-check mb-3">
+    <input class="form-check-input" type="checkbox" id="parseAfterUpload" checked>
+    <label class="form-check-label" for="parseAfterUpload">
+      <b>Automatically parse questions after upload</b> (using OpenRouter AI)
+    </label>
+  </div>
+  
   <button class="btn btn-primary" type="submit">Upload Answer Key</button>
 </form>
+
+<script>
+// Handle form submission
+document.getElementById('answerKeyForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  
+  const formData = new FormData(this);
+  const uploadStatus = document.getElementById('uploadStatus');
+  const uploadBtn = this.querySelector('button[type="submit"]');
+  
+  uploadBtn.disabled = true;
+  uploadBtn.textContent = 'Uploading...';
+  uploadStatus.innerHTML = '<div class="alert alert-info">⏳ Uploading answer key...</div>';
+  
+  try {
+    const response = await fetch('/upload/answer-key', {
+      method: 'POST',
+      body: formData
+    });
+    
+    const data = await response.json();
+    
+    if (response.ok && data.success) {
+      const courseId = data.course_id;
+      const assignmentId = data.assignment_id;
+      const filename = data.filename;
+      
+      uploadStatus.innerHTML = `
+        <div class="alert alert-success">
+          ✅ ${data.message}
+          <br><small>File: ${filename}</small>
+        </div>
+      `;
+      
+      // Check if auto-parse is enabled
+      if (document.getElementById('parseAfterUpload').checked) {
+        await parseQuestionsAfterUpload(courseId, assignmentId, filename);
+      }
+      
+      // Reset form
+      this.reset();
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = 'Upload Answer Key';
+      
+      // Reload existing keys after a delay
+      setTimeout(() => {
+        window.location.reload();
+      }, 2000);
+    } else {
+      uploadStatus.innerHTML = `
+        <div class="alert alert-danger">
+          ❌ Error: ${data.error || 'Upload failed'}
+        </div>
+      `;
+      uploadBtn.disabled = false;
+      uploadBtn.textContent = 'Upload Answer Key';
+    }
+  } catch (error) {
+    uploadStatus.innerHTML = `
+      <div class="alert alert-danger">
+        ❌ Network error: ${error.message}
+      </div>
+    `;
+    uploadBtn.disabled = false;
+    uploadBtn.textContent = 'Upload Answer Key';
+  }
+});
+
+// Load courses on page load and set up event listeners
+async function loadCoursesDropdown() {
+  const sel = document.getElementById('courseSelect');
+  sel.innerHTML = '<option value="">Loading courses...</option>';
+  
+  try {
+    const res = await fetch('/api/canvas/courses');
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    
+    const courses = await res.json();
+    sel.innerHTML = '<option value="">Select a course...</option>';
+    
+    if (!courses || courses.length === 0) {
+      sel.innerHTML = '<option value="">No courses available</option>';
+    } else {
+      courses.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.name || c.course_code || c.id;
+        sel.appendChild(opt);
+      });
+    }
+  } catch (error) {
+    console.error('Error loading courses:', error);
+    sel.innerHTML = '<option value="">Error loading courses</option>';
+  }
+}
+
+async function loadAssignmentsDropdown() {
+  const courseId = document.getElementById('courseSelect').value;
+  const fileUploadsOnly = document.getElementById('fileUploadsOnly').checked;
+  const sel = document.getElementById('assignmentSelect');
+  
+  if (!courseId) {
+    sel.innerHTML = '<option value="">Select a course first...</option>';
+    return;
+  }
+  
+  sel.innerHTML = '<option value="">Loading assignments...</option>';
+  sel.disabled = true;
+  
+  try {
+    const url = `/api/canvas/${courseId}/assignments?file_uploads_only=${fileUploadsOnly}`;
+    const res = await fetch(url);
+    
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
+    
+    const assigns = await res.json();
+    sel.innerHTML = '';
+    
+    if (!assigns || assigns.length === 0) {
+      const filterMsg = fileUploadsOnly ? ' (with file uploads)' : '';
+      sel.innerHTML = `<option value="">No assignments found${filterMsg}</option>`;
+    } else {
+      sel.innerHTML = '<option value="">Select an assignment...</option>';
+      assigns.forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        
+        // Show submission types in the option text
+        const submissionTypes = a.submission_types || [];
+        const hasFileUpload = submissionTypes.includes('online_upload') || submissionTypes.includes('media_recording');
+        const typeIndicator = hasFileUpload ? ' 📁' : '';
+        
+        opt.textContent = `${a.name || a.id}${typeIndicator}`;
+        sel.appendChild(opt);
+      });
+    }
+    
+    sel.disabled = false;
+  } catch (error) {
+    console.error('Error loading assignments:', error);
+    sel.innerHTML = '<option value="">Error loading assignments</option>';
+    sel.disabled = false;
+  }
+}
+
+function onCourseChange() {
+  const courseId = document.getElementById('courseSelect').value;
+  const courseIdInput = document.getElementById('courseId');
+  courseIdInput.value = courseId;
+  
+  if (courseId) {
+    loadAssignmentsDropdown();
+  } else {
+    const assignmentSelect = document.getElementById('assignmentSelect');
+    assignmentSelect.innerHTML = '<option value="">Select a course first...</option>';
+    document.getElementById('assignmentId').value = '';
+  }
+}
+
+function onAssignmentChange() {
+  const assignmentId = document.getElementById('assignmentSelect').value;
+  const assignmentIdInput = document.getElementById('assignmentId');
+  assignmentIdInput.value = assignmentId;
+}
+
+function onFilterChange() {
+  const courseId = document.getElementById('courseSelect').value;
+  if (courseId) {
+    loadAssignmentsDropdown();
+  }
+}
+
+// Event listeners for upload form
+document.getElementById('courseSelect').addEventListener('change', onCourseChange);
+document.getElementById('assignmentSelect').addEventListener('change', onAssignmentChange);
+document.getElementById('fileUploadsOnly').addEventListener('change', onFilterChange);
+
+// Load courses on page load
+document.addEventListener('DOMContentLoaded', function() {
+  loadCoursesDropdown();
+});
+
+async function parseQuestionsAfterUpload(courseId, assignmentId, filename) {
+  const uploadStatus = document.getElementById('uploadStatus');
+  
+  uploadStatus.innerHTML = `
+    <div class="alert alert-info">
+      ⏳ Uploading answer key...
+      <br>📝 Parsing questions with OpenRouter AI...
+    </div>
+  `;
+  
+  try {
+    const response = await fetch(`/api/parse-questions/${courseId}/${assignmentId}/${filename}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    
+    const data = await response.json();
+    
+    if (response.ok && data.success) {
+      uploadStatus.innerHTML = `
+        <div class="alert alert-success">
+          ✅ Answer key uploaded successfully!
+          <br>📝 ${data.message}
+          <br><small>Questions saved to: course_${courseId}/assignment_${assignmentId}/questions/</small>
+        </div>
+      `;
+    } else {
+      uploadStatus.innerHTML = `
+        <div class="alert alert-warning">
+          ⚠️ Answer key uploaded, but parsing failed: ${data.error || 'Unknown error'}
+          <br><small>You can try parsing again later from the existing answer keys section below.</small>
+        </div>
+      `;
+    }
+  } catch (error) {
+    uploadStatus.innerHTML = `
+      <div class="alert alert-warning">
+        ⚠️ Answer key uploaded, but parsing failed: ${error.message}
+        <br><small>You can try parsing again later from the existing answer keys section below.</small>
+      </div>
+    `;
+  }
+}
+</script>
 
 {% if existing_answer_keys %}
 <hr>

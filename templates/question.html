@@ -75,7 +75,7 @@ async function loadCoursesFromFolders() {
       data.courses.forEach(course => {
         const opt = document.createElement('option');
         opt.value = course.course_id;
-        opt.textContent = `Course ${course.course_id} (${course.assignment_count} assignments)`;
+        opt.textContent = `${course.course_name}`;
         sel.appendChild(opt);
       });
     }
@@ -119,7 +119,7 @@ async function loadAssignmentsWithQuestions() {
       data.assignments.forEach(assignment => {
         const opt = document.createElement('option');
         opt.value = assignment.assignment_id;
-        opt.textContent = `Assignment ${assignment.assignment_id} (${assignment.has_questions ? '✅ Questions' : '❌ No Questions'})`;
+        opt.textContent = `${assignment.assignment_name} (${assignment.has_questions ? '✅ Questions' : '❌ No Questions'})`;
         sel.appendChild(opt);
       });
       loadBtn.disabled = false;
@@ -162,9 +162,15 @@ function onAssignmentChange() {
 async function loadParsedQuestions() {
   const courseId = document.getElementById('courseId').value.trim();
   const assignmentId = document.getElementById('assignmentId').value.trim();
+  const courseSelect = document.getElementById('courseSelect');
+  const assignmentSelect = document.getElementById('assignmentSelect');
   const statusDiv = document.getElementById('status');
   const questionsContainer = document.getElementById('questionsContainer');
   const compareBtn = document.getElementById('compareSubmissionsBtn');
+  
+  // Get display names from selected options
+  const courseText = courseSelect.options[courseSelect.selectedIndex].text;
+  const assignmentText = assignmentSelect.options[assignmentSelect.selectedIndex].text;
   
   if (!assignmentId || !courseId) {
     statusDiv.innerHTML = '<div class="alert alert-warning">Please select both course and assignment</div>';
@@ -189,7 +195,7 @@ async function loadParsedQuestions() {
       
       statusDiv.innerHTML = `
         <div class="alert alert-success">
-          ✅ Loaded parsed questions for Course ${courseId}, Assignment ${assignmentId}
+          ✅ Loaded parsed questions for ${courseText} > ${assignmentText}
           <br><small>Questions are displayed in markdown format below</small>
         </div>
       `;
@@ -223,10 +229,28 @@ async function compareSubmissions() {
   
   compareBtn.disabled = true;
   compareBtn.textContent = 'Comparing...';
-  statusDiv.innerHTML = '<div class="alert alert-info">⏳ Comparing all student submissions to parsed questions...</div>';
+  
+  // Create progress bar HTML
+  statusDiv.innerHTML = `
+    <div class="alert alert-info">
+      <h5>Grading in Progress...</h5>
+      <div class="progress" style="height: 25px;">
+        <div id="progressBar" class="progress-bar progress-bar-animated" role="progressbar" 
+             style="width: 0%; display: flex; align-items: center; justify-content: center; color: black; font-weight: bold;">
+          0%
+        </div>
+      </div>
+      <p id="progressText" class="mt-2 mb-0">Starting grading...</p>
+    </div>
+  `;
+  
+  let totalStudents = 0;
+  let completedCount = 0;
+  let allResults = [];
+  let pointsPossible = 100;
   
   try {
-    const response = await fetch('/api/compare-submissions', {
+    const response = await fetch('/api/compare-submissions-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
@@ -235,25 +259,85 @@ async function compareSubmissions() {
       })
     });
     
-    const data = await response.json();
+    if (!response.ok) {
+      statusDiv.innerHTML = `<div class="alert alert-danger">❌ Error: Failed to start grading</div>`;
+      compareBtn.disabled = false;
+      compareBtn.textContent = 'Compare All Submissions';
+      return;
+    }
     
-    if (response.ok) {
-      statusDiv.innerHTML = `
-        <div class="alert alert-success">
-          ✅ Comparison complete! 
-          <br>Analyzed ${data.total_students} students
-          <br>Successfully graded: ${data.successfully_graded}
-          <br>Average score: ${data.average_score}%
-          <br>Processing time: ${data.processing_time_seconds}s
-        </div>
-      `;
+    // Read Server-Sent Events stream
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
       
-      // Display results table
-      displayComparisonResults(data.comparison_results);
-      resultsDiv.style.display = 'block';
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n');
       
-    } else {
-      statusDiv.innerHTML = `<div class="alert alert-danger">❌ Error: ${data.error}</div>`;
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const eventData = JSON.parse(line.substring(6));
+            
+            if (eventData.error) {
+              statusDiv.innerHTML = `<div class="alert alert-danger">❌ Error: ${eventData.error}</div>`;
+              compareBtn.disabled = false;
+              compareBtn.textContent = 'Compare All Submissions';
+              return;
+            }
+            
+            if (eventData.type === 'start') {
+              totalStudents = eventData.total;
+              pointsPossible = eventData.points_possible;
+              document.getElementById('progressText').textContent = `Starting grading of ${totalStudents} students...`;
+            } 
+            else if (eventData.type === 'progress') {
+              completedCount = eventData.completed;
+              const percentage = Math.round((completedCount / totalStudents) * 100);
+              const progressBar = document.getElementById('progressBar');
+              progressBar.style.width = percentage + '%';
+              progressBar.textContent = percentage + '%';
+              document.getElementById('progressText').textContent = 
+                `Graded ${completedCount}/${totalStudents} - Current: ${eventData.current} (${eventData.score}% = ${eventData.points} pts)`;
+            } 
+            else if (eventData.type === 'complete') {
+              allResults = eventData.results;
+              
+              // Update progress bar to 100%
+              const progressBar = document.getElementById('progressBar');
+              progressBar.style.width = '100%';
+              progressBar.textContent = '100%';
+              
+              // Show completion summary with a collapse button
+              statusDiv.innerHTML = `
+                <div class="alert alert-success" id="completionStatus">
+                  <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                      <h5 style="margin: 0 0 0.5rem 0;">✅ Comparison complete!</h5>
+                      <p style="margin: 0.25rem 0;">
+                        Analyzed ${eventData.total} students | Successfully graded: ${eventData.successful} | 
+                        Average score: ${eventData.average_percentage}% (${eventData.average_points}/${eventData.points_possible} points)
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              `;
+              
+              // Display results table
+              displayComparisonResults(allResults);
+              resultsDiv.style.display = 'block';
+              
+              // Scroll to results
+              resultsDiv.scrollIntoView({ behavior: 'smooth' });
+            }
+          } catch (e) {
+            console.error('Error parsing event:', e);
+          }
+        }
+      }
     }
   } catch (error) {
     console.error('Error comparing submissions:', error);
@@ -274,6 +358,7 @@ function displayComparisonResults(results) {
           <tr>
             <th>User ID</th>
             <th>Score</th>
+            <th>Points</th>
             <th>Status</th>
             <th>Details</th>
           </tr>
@@ -283,14 +368,17 @@ function displayComparisonResults(results) {
   
   results.forEach((result, index) => {
     const score = result.score !== undefined ? result.score : (result.score_percentage !== undefined ? result.score_percentage : 0);
+    const points = result.points !== undefined ? result.points : 0;
+    const pointsPossible = result.points_possible || 100;
     const scoreClass = score >= 80 ? 'text-success' : 
                       score >= 60 ? 'text-warning' : 'text-danger';
     const status = result.error ? `<span class="badge bg-danger">Error</span>` : `<span class="badge bg-success">Graded</span>`;
     
     html += `
       <tr>
-        <td>${result.user_id} (${result.user_name})</td>
+        <td>${result.user_id}</td>
         <td><span class="${scoreClass} fw-bold">${score}%</span></td>
+        <td><span class="${scoreClass} fw-bold">${points}/${pointsPossible}</span></td>
         <td>${status}</td>
         <td>
           <button class="btn btn-sm btn-outline-info" onclick="showFeedbackDetails(${index})">
@@ -329,12 +417,14 @@ function showFeedbackDetails(studentIndex) {
   const contentDiv = document.getElementById('feedbackDetailsContent');
   
   const score = result.score !== undefined ? result.score : (result.score_percentage !== undefined ? result.score_percentage : 0);
+  const points = result.points !== undefined ? result.points : 0;
+  const pointsPossible = result.points_possible || 100;
   const scoreClass = score >= 80 ? 'bg-success' : score >= 60 ? 'bg-warning' : 'bg-danger';
   
   let html = `
     <div class="mb-3">
       <h6>${result.user_id} - ${result.user_name}</h6>
-      <div class="badge ${scoreClass} fs-6">Score: ${score}%</div>
+      <div class="badge ${scoreClass} fs-6">Score: ${score}% (${points}/${pointsPossible} points)</div>
     </div>
   `;
   
