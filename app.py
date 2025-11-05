@@ -180,6 +180,7 @@ def _maybe_redirect_setup():
         "api_canvas_courses",
         "api_canvas_assignments",
         "api_canvas_modules",
+        "api_canvas_module_items",
         "api_canvas_students",
         "api_canvas_submissions",
         "root",
@@ -316,9 +317,25 @@ def api_canvas_assignments(course_id):
     api_url, token = _resolve_canvas_creds()
     try:
         s = _canvas_session(token)
-        r = s.get(f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/assignments", timeout=60)
-        r.raise_for_status()
-        return jsonify(r.json())
+        # Fetch all assignments with pagination
+        all_assignments = []
+        page = 1
+        while True:
+            r = s.get(
+                f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/assignments",
+                params={"per_page": 100, "page": page},
+                timeout=60
+            )
+            r.raise_for_status()
+            assignments = r.json()
+            if not assignments:
+                break
+            all_assignments.extend(assignments)
+            # Check if there are more pages
+            if 'link' not in r.headers or 'rel="next"' not in r.headers.get('link', ''):
+                break
+            page += 1
+        return jsonify(all_assignments)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -328,9 +345,53 @@ def api_canvas_modules(course_id):
     api_url, token = _resolve_canvas_creds()
     try:
         s = _canvas_session(token)
-        r = s.get(f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/modules", timeout=60)
-        r.raise_for_status()
-        return jsonify(r.json())
+        # Fetch all modules with pagination
+        all_modules = []
+        page = 1
+        while True:
+            r = s.get(
+                f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/modules",
+                params={"per_page": 100, "page": page},
+                timeout=60
+            )
+            r.raise_for_status()
+            modules = r.json()
+            if not modules:
+                break
+            all_modules.extend(modules)
+            # Check if there are more pages
+            if 'link' not in r.headers or 'rel="next"' not in r.headers.get('link', ''):
+                break
+            page += 1
+        return jsonify(all_modules)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.get("/api/canvas/<course_id>/modules/<module_id>/items")
+def api_canvas_module_items(course_id, module_id):
+    api_url, token = _resolve_canvas_creds()
+    try:
+        s = _canvas_session(token)
+        # Fetch all module items with pagination
+        all_items = []
+        page = 1
+        while True:
+            r = s.get(
+                f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/modules/{module_id}/items",
+                params={"per_page": 100, "page": page},
+                timeout=60
+            )
+            r.raise_for_status()
+            items = r.json()
+            if not items:
+                break
+            all_items.extend(items)
+            # Check if there are more pages
+            if 'link' not in r.headers or 'rel="next"' not in r.headers.get('link', ''):
+                break
+            page += 1
+        return jsonify(all_items)
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -340,13 +401,27 @@ def api_canvas_students(course_id):
     api_url, token = _resolve_canvas_creds()
     try:
         s = _canvas_session(token)
-        r = s.get(
-            f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/users",
-            params={"enrollment_type[]": "student"},
-            timeout=60,
-        )
-        if r.status_code == 200:
-            return jsonify(r.json())
+        # Fetch all students with pagination
+        all_students = []
+        page = 1
+        while True:
+            r = s.get(
+                f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/users",
+                params={"enrollment_type[]": "student", "per_page": 100, "page": page},
+                timeout=60,
+            )
+            if r.status_code != 200:
+                break
+            students = r.json()
+            if not students:
+                break
+            all_students.extend(students)
+            # Check if there are more pages
+            if 'link' not in r.headers or 'rel="next"' not in r.headers.get('link', ''):
+                break
+            page += 1
+        if all_students:
+            return jsonify(all_students)
     except Exception:
         pass
     # Fallback from manifest
@@ -653,19 +728,25 @@ def api_stats_students():
 def api_stats_questions():
     # Prefer structured per_question results from grading; fallback to heuristic
     qsum: Dict[str, List[float]] = {}
+    qinfo: Dict[str, Dict[str, str]] = {}  # Track assignment_id for each question
     used_structured = False
     for r in CACHE.get("results", []):
         pq = r.get("per_question")
+        assignment_id = str(r.get("assignment_id"))
         if isinstance(pq, list):
             used_structured = True
             for item in pq:
                 try:
                     qid = str(item.get("qid"))
+                    # Create unique key combining assignment_id and qid
+                    unique_key = f"{assignment_id}_{qid}"
                     sc = item.get("score")
                     if sc is None and isinstance(item.get("correct"), bool):
                         sc = 10.0 if item["correct"] else 0.0
                     if isinstance(sc, (int, float)):
-                        qsum.setdefault(qid, []).append(float(sc))
+                        qsum.setdefault(unique_key, []).append(float(sc))
+                        if unique_key not in qinfo:
+                            qinfo[unique_key] = {"assignment_id": assignment_id, "qid": qid}
                 except Exception:
                     continue
     if not used_structured:
@@ -695,22 +776,29 @@ def api_stats_questions():
             parts = slice_answers_into_questions(text, ak)
             for q in qdefs:
                 qid = str(q.get("id"))
+                # Create unique key combining assignment_id and qid
+                unique_key = f"{assignment_id}_{qid}"
                 max_score = int(q.get("max_score", 10))
                 kw = q.get("keywords", []) or []
                 rub = q.get("rubric", "")
                 sc = heuristic_score(parts.get(qid, ""), rub, kw, max_score)
-                qsum.setdefault(qid, []).append(sc)
+                qsum.setdefault(unique_key, []).append(sc)
+                if unique_key not in qinfo:
+                    qinfo[unique_key] = {"assignment_id": assignment_id, "qid": qid}
     out = []
-    for qid, scores in qsum.items():
+    for unique_key, scores in qsum.items():
         if not scores:
             continue
         arr = [float(x) for x in scores]
         out.append({
-            "qid": qid,
+            "qid": qinfo.get(unique_key, {}).get("qid", unique_key),
+            "assignment_id": qinfo.get(unique_key, {}).get("assignment_id", ""),
             "avg": round(sum(arr) / len(arr), 2),
             "median": round(statistics.median(arr), 2),
             "stdev": round(statistics.pstdev(arr), 2) if len(arr) > 1 else 0.0,
         })
+    # Sort by assignment_id, then by qid
+    out.sort(key=lambda x: (x.get("assignment_id", ""), x.get("qid", "")))
     return jsonify(out)
 
 
@@ -806,6 +894,159 @@ def questions_page():
 def performance_page():
     refresh_cache()
     return render_template("performance.html", env=os.environ)
+
+
+@app.get("/api/canvas/<course_id>/assignments/<assignment_id>/grades")
+def api_canvas_assignment_grades(course_id, assignment_id):
+    api_url, token = _resolve_canvas_creds()
+    try:
+        s = _canvas_session(token)
+        # Fetch all submissions for the assignment with pagination
+        all_submissions = []
+        page = 1
+        while True:
+            r = s.get(
+                f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/assignments/{assignment_id}/submissions",
+                params={"per_page": 100, "page": page, "include[]": ["user"]},
+                timeout=60
+            )
+            r.raise_for_status()
+            submissions = r.json()
+            if not submissions:
+                break
+            all_submissions.extend(submissions)
+            # Check if there are more pages
+            if 'link' not in r.headers or 'rel="next"' not in r.headers.get('link', ''):
+                break
+            page += 1
+        
+        # Format the submissions for display
+        grades = []
+        for sub in all_submissions:
+            user = sub.get('user') or {}
+            grades.append({
+                "user_id": user.get('id') or sub.get('user_id'),
+                "name": user.get('name') or sub.get('display_name') or f"user_{sub.get('user_id')}",
+                "email": user.get('email'),
+                "score": sub.get('score'),
+                "grade": sub.get('grade'),
+                "submitted_at": sub.get('submitted_at'),
+                "workflow_state": sub.get('workflow_state'),
+                "late": sub.get('late'),
+                "missing": sub.get('missing'),
+                "excused": sub.get('excused'),
+            })
+        
+        return jsonify({"grades": grades, "count": len(grades)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.get("/api/assignment/<assignment_id>/grade-comparison")
+def api_grade_comparison(assignment_id):
+    """Compare LLM grades vs Canvas grades for an assignment"""
+    try:
+        # Get LLM grades from local results
+        results_path = assignment_results_path(assignment_id)
+        llm_grades = {}
+        if results_path and os.path.exists(results_path):
+            for line in _read_jsonl(results_path):
+                user_id = str(line.get("user_id"))
+                llm_grades[user_id] = {
+                    "name": line.get("name"),
+                    "llm_score": line.get("score"),
+                    "llm_reply": line.get("reply", "")[:500],  # Truncate reply
+                    "per_question": line.get("per_question"),
+                    "error": line.get("error"),
+                }
+        
+        # Get Canvas grades
+        course_id = env("CANVAS_COURSE_ID")
+        api_url = env("CANVAS_API_URL")
+        token = env("CANVAS_API_TOKEN")
+        
+        canvas_grades = {}
+        if api_url and token and course_id:
+            try:
+                s = requests.Session()
+                s.headers.update({"Authorization": f"Bearer {token}"})
+                
+                # Fetch all submissions with pagination
+                all_submissions = []
+                page = 1
+                while True:
+                    r = s.get(
+                        f"{api_url.rstrip('/')}/api/v1/courses/{course_id}/assignments/{assignment_id}/submissions",
+                        params={"per_page": 100, "page": page, "include[]": ["user"]},
+                        timeout=60
+                    )
+                    if r.status_code != 200:
+                        break
+                    submissions = r.json()
+                    if not submissions:
+                        break
+                    all_submissions.extend(submissions)
+                    if 'link' not in r.headers or 'rel="next"' not in r.headers.get('link', ''):
+                        break
+                    page += 1
+                
+                for sub in all_submissions:
+                    user_id = str(sub.get("user_id") or (sub.get("user") or {}).get("id"))
+                    user = sub.get("user") or {}
+                    canvas_grades[user_id] = {
+                        "name": user.get("name") or sub.get("display_name"),
+                        "canvas_score": sub.get("score"),
+                        "canvas_grade": sub.get("grade"),
+                        "submitted_at": sub.get("submitted_at"),
+                        "workflow_state": sub.get("workflow_state"),
+                    }
+            except Exception as e:
+                print(f"[DEBUG] Error fetching Canvas grades: {str(e)}")
+        
+        # Merge and compare
+        all_user_ids = set(llm_grades.keys()) | set(canvas_grades.keys())
+        comparisons = []
+        
+        for user_id in sorted(all_user_ids):
+            llm_data = llm_grades.get(user_id, {})
+            canvas_data = canvas_grades.get(user_id, {})
+            
+            llm_score = llm_data.get("llm_score")
+            canvas_score = canvas_data.get("canvas_score")
+            
+            # Calculate difference
+            difference = None
+            if llm_score is not None and canvas_score is not None:
+                difference = canvas_score - llm_score
+            
+            comparisons.append({
+                "user_id": user_id,
+                "name": llm_data.get("name") or canvas_data.get("name"),
+                "llm_score": llm_score,
+                "canvas_score": canvas_score,
+                "difference": difference,
+                "llm_error": llm_data.get("error"),
+                "canvas_grade": canvas_data.get("canvas_grade"),
+                "submitted_at": canvas_data.get("submitted_at"),
+                "workflow_state": canvas_data.get("workflow_state"),
+                "per_question": llm_data.get("per_question"),
+            })
+        
+        return jsonify({"comparisons": comparisons, "count": len(comparisons)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/grade-comparison")
+def grade_comparison_page():
+    refresh_cache()
+    return render_template("grade_comparison.html", env=os.environ)
+
+
+@app.route("/grades")
+def grades_page():
+    refresh_cache()
+    return render_template("grades.html", env=os.environ)
 
 
 # Typer CLI

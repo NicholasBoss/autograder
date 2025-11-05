@@ -27,7 +27,7 @@
 </div>
 
 <div class="card mt-4"><div class="card-body">
-  <canvas id="assignBar" height="100"></canvas>
+  <canvas id="assignBar" height="100" data-course-id="{{ env.get('CANVAS_COURSE_ID','') }}"></canvas>
 </div></div>
 
 <script>
@@ -39,7 +39,24 @@ async function load() {
   const avgs = assigns.map(a => a.avg).filter(x => typeof x==='number');
   const overall = avgs.length? (avgs.reduce((a,b)=>a+b,0)/avgs.length).toFixed(2) : '-';
   document.getElementById('avgScore').innerText = overall;
-  new Chart(document.getElementById('assignBar'), {type:'bar', data:{labels:assigns.map(a=>a.assignment_id), datasets:[{label:'Average', data:assigns.map(a=>a.avg||0)}]}});
+  
+  // Fetch assignment names from Canvas
+  const courseId = document.getElementById('assignBar').dataset.courseId;
+  
+  let assignmentNames = {};
+  if(courseId) {
+    try {
+      const canvasAssigns = await (await fetch(`/api/canvas/${encodeURIComponent(courseId)}/assignments`)).json();
+      assignmentNames = {};
+      (canvasAssigns || []).forEach(a => {
+        assignmentNames[a.id] = a.name;
+      });
+    } catch(e) {
+      console.error('Error fetching assignments:', e);
+    }
+  }
+  
+  new Chart(document.getElementById('assignBar'), {type:'bar', data:{labels:assigns.map(a=>assignmentNames[a.assignment_id] || `Assignment ${a.assignment_id}`), datasets:[{label:'Average', data:assigns.map(a=>a.avg||0)}]}});
 }
 load();
 </script>

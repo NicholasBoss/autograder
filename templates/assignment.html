@@ -81,20 +81,56 @@ async function populateAssignments(){
   }
   const res = await fetch(`/api/canvas/${encodeURIComponent(courseId)}/assignments`);
   const assigns = await res.json();
+  window.allAssignments = assigns || [];
+  filterAssignmentsByModule();
+  if(document.getElementById('assignmentSelect').value){ loadAssignmentData(document.getElementById('assignmentSelect').value); }
+}
+
+function filterAssignmentsByModule(){
+  const moduleId = document.getElementById('moduleSelect').value;
   const select = document.getElementById('assignmentSelect');
   select.innerHTML = '';
   const stored = '{{ env.get("CANVAS_ASSIGNMENT_ID","") }}';
-  (assigns || []).forEach(a => {
-    // Only show published assignments
-    if (a.published) {
-      const opt = document.createElement('option');
-      opt.value = a.id;
-      opt.textContent = a.name || `Assignment ${a.id}`;
-      if (String(a.id) === stored) opt.selected = true;
-      select.appendChild(opt);
-    }
-  });
-  if(select.value){ loadAssignmentData(select.value); }
+  
+  if(!moduleId){
+    // Show all assignments
+    (window.allAssignments || []).forEach(a => {
+      if (a.published) {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = a.name || `Assignment ${a.id}`;
+        if (String(a.id) === stored) opt.selected = true;
+        select.appendChild(opt);
+      }
+    });
+  } else {
+    // Fetch module items to filter assignments
+    fetch(`/api/canvas/${encodeURIComponent(courseId)}/modules/${encodeURIComponent(moduleId)}/items`)
+      .then(res => res.json())
+      .then(items => {
+        // Extract assignment IDs from module items
+        const assignmentIds = new Set();
+        (items || []).forEach(item => {
+          if (item.type === 'Assignment' && item.content_id) {
+            assignmentIds.add(item.content_id);
+          }
+        });
+        
+        // Filter and display only assignments in this module
+        (window.allAssignments || []).forEach(a => {
+          if (a.published && assignmentIds.has(a.id)) {
+            const opt = document.createElement('option');
+            opt.value = a.id;
+            opt.textContent = a.name || `Assignment ${a.id}`;
+            if (String(a.id) === stored) opt.selected = true;
+            select.appendChild(opt);
+          }
+        });
+        
+        if(select.value){ loadAssignmentData(select.value); }
+      })
+      .catch(err => console.error('Error loading module items:', err));
+  }
 }
 
 async function loadModules(){
@@ -149,6 +185,8 @@ async function loadAssignmentData(aid){
     options:{scales:{y:{beginAtZero:true,max:10}}}
   });
 }
+
+document.getElementById('moduleSelect').addEventListener('change', e => filterAssignmentsByModule());
 
 document.getElementById('assignmentSelect').addEventListener('change', e => loadAssignmentData(e.target.value));
 

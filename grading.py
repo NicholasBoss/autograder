@@ -3,6 +3,7 @@ import os
 import re
 import time
 from typing import Literal, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -44,7 +45,7 @@ def _first_parsable_attachment(attachments: list) -> Optional[str]:
     for a in attachments:
         path = a.get("saved_path")
         ext = os.path.splitext(path or "")[1].lower()
-        if ext in (".txt", ".pdf", ".docx", ".html"):
+        if ext in (".txt", ".pdf", ".docx", ".html", ".sql", ".py", ".js", ".java", ".cpp", ".c", ".cs", ".r", ".md"):
             return path
     return None
 
@@ -95,7 +96,34 @@ def _read_file_text(path: str) -> str:
     if not path or not os.path.exists(path):
         return ""
     ext = os.path.splitext(path)[1].lower()
-    if ext in (".json", ".txt", ".pdf", ".docx"):
+    
+    # Code files (SQL, Python, etc.) - read as plain text with markdown formatting
+    code_extensions = {
+        ".sql": "sql",
+        ".py": "python",
+        ".js": "javascript",
+        ".java": "java",
+        ".cpp": "cpp",
+        ".c": "c",
+        ".cs": "csharp",
+        ".r": "r",
+        ".rb": "ruby",
+        ".php": "php",
+        ".go": "go",
+        ".ts": "typescript",
+    }
+    
+    if ext in code_extensions:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                code_content = f.read()
+            # Wrap in markdown code block
+            lang = code_extensions[ext]
+            return f"```{lang}\n{code_content}\n```"
+        except Exception:
+            return ""
+    
+    if ext in (".json", ".txt", ".pdf", ".docx", ".html", ".md"):
         if ext == ".json":
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -117,6 +145,7 @@ def _read_file_text(path: str) -> str:
         else:
             t = read_text_from_file(path)
             return t or ""
+    
     # unknown extensions: try utf-8
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -144,6 +173,138 @@ def _parse_numeric_score(text: str) -> Optional[float]:
     return round(val, 2)
 
 
+
+
+def _grade_single_submission(
+    sub: dict,
+    course_id: str | int,
+    assignment_id: str | int,
+    answer_key_text: str,
+    prompt: str,
+    system_prompt: str,
+    backend: str,
+    ollama_host: str | None,
+    ollama_model: str | None,
+    openrouter_api_key: str | None,
+    openrouter_model: str | None,
+) -> tuple[dict, int]:
+    """Grade a single submission and return (result_dict, files_read_count)"""
+    files_read = 0
+    
+    text = (sub.get("body_text") or "").strip()
+    if not text:
+        path = _first_parsable_attachment(sub.get("attachments") or [])
+        print(f"[DEBUG] Student {sub.get('name')}: Found attachment path: {path}")
+        if path:
+            # Normalize the path to handle mixed separators
+            normalized_path = os.path.normpath(path)
+            print(f"[DEBUG] Normalized path: {normalized_path}")
+            print(f"[DEBUG] Path exists: {os.path.exists(normalized_path)}")
+            # Use _read_file_text which handles code files (SQL, Python, etc.)
+            t = _read_file_text(normalized_path)
+            print(f"[DEBUG] Read {len(t)} characters from file")
+            if t:
+                text = t
+                files_read += 1
+    
+    if not text:
+        out = {
+            "course_id": course_id,
+            "assignment_id": assignment_id,
+            "user_id": sub.get("user_id"),
+            "name": sub.get("name"),
+            "reply": "",
+            "score": None,
+            "error": "no_text",
+        }
+        return (out, files_read)
+
+    print(f"[DEBUG] Grading student {sub.get('name')} - submission text length: {len(text)}")
+    
+    # Check if we have answer key
+    if not answer_key_text:
+        print(f"[WARNING] No answer key available! Skipping API call.")
+        out = {
+            "course_id": course_id,
+            "assignment_id": assignment_id,
+            "user_id": sub.get("user_id"),
+            "name": sub.get("name"),
+            "reply": "ERROR: No answer key provided. Cannot grade without answer key.",
+            "score": None,
+            "error": "no_answer_key",
+        }
+        return (out, files_read)
+    
+    try:
+        user_payload = (
+            f"ANSWER_KEY:\n{answer_key_text}\n\n"
+            f"STUDENT_SUBMISSION:\n{text}\n\n"
+            f"GUIDANCE:\n{prompt}"
+        )
+        print(f"[DEBUG] Sending to {backend} API for {sub.get('name')}...")
+        if backend == "ollama":
+            reply = _call_ollama(ollama_host or "http://localhost:11434", ollama_model or "llama3.1", system_prompt, user_payload)
+        else:
+            # Use model from environment or fallback to gpt-3.5-turbo
+            model = openrouter_model if openrouter_model else "openai/gpt-3.5-turbo"
+            print(f"[DEBUG] Using OpenRouter model: {model} for {sub.get('name')}")
+            if not openrouter_api_key:
+                raise ValueError("OPENROUTER_API_KEY is not configured")
+            reply = _call_openrouter(openrouter_api_key, model, system_prompt, user_payload)
+        print(f"[DEBUG] Got reply from API for {sub.get('name')} (length: {len(reply)})")
+    except Exception as e:
+        print(f"[ERROR] Exception during grading for {sub.get('name')}: {str(e)}")
+        reply = f"ERROR: {str(e)}"
+    
+    err = None
+    if not reply:
+        err = "backend_error"
+        print(f"[DEBUG] No reply from backend for {sub.get('name')}")
+    elif reply.startswith("ERROR:"):
+        err = "api_error"
+    
+    # Try to parse JSON response for structured grading
+    per_question = None
+    score = None
+    if reply:
+        print(f"[DEBUG] Reply length for {sub.get('name')}: {len(reply)}")
+        try:
+            # Extract first JSON object
+            import re as _re
+            m = _re.search(r"\{[\s\S]*\}", reply)
+            js = reply if reply.strip().startswith("{") else (m.group(0) if m else "")
+            if js:
+                obj = json.loads(js)
+                pq = obj.get("per_question")
+                if isinstance(pq, list):
+                    per_question = pq
+                elif isinstance(pq, dict):
+                    # normalize to list
+                    per_question = [dict(qid=k, **v) if isinstance(v, dict) else {"qid": k, "score": v} for k, v in pq.items()]
+                oscore = obj.get("overall_score")
+                if isinstance(oscore, (int, float)):
+                    score = float(oscore)
+                    print(f"[DEBUG] Parsed score for {sub.get('name')}: {score}")
+        except Exception as e:
+            print(f"[DEBUG] Exception parsing JSON for {sub.get('name')}: {str(e)}")
+            pass
+    
+    if score is None:
+        score = _parse_numeric_score(reply)
+    
+    rec = {
+        "course_id": course_id,
+        "assignment_id": assignment_id,
+        "user_id": sub.get("user_id"),
+        "name": sub.get("name"),
+        "reply": reply,
+        "score": score,
+        "per_question": per_question,
+        "error": err,
+    }
+    return (rec, files_read)
+
+
 def run_grading(
     backend: Literal["ollama", "openrouter"],
     prompt: str,
@@ -157,6 +318,7 @@ def run_grading(
     openrouter_api_key: str | None = None,
     openrouter_model: str | None = None,
     answer_key_path: str | None = None,
+    num_workers: int = 10,
 ) -> dict:
     start = time.time()
 
@@ -177,7 +339,6 @@ def run_grading(
     if os.path.exists(out_path):
         os.remove(out_path)
 
-    out_f = open(out_path, "w", encoding="utf-8")
     files = 0
     students = 0
     errors = 0
@@ -213,107 +374,76 @@ def run_grading(
     # System prompt designed for per-question analysis and JSON output
     system_prompt = (
         "You are an autograder. Compare a student's submission to the provided answer key. "
+        "The submissions may be code (SQL, Python, etc.) or text answers. For code submissions, check for correctness, logic, and best practices. "
         "Identify the number of questions and grade each question with a score 0..1 (1=correct, 0=incorrect, partial allowed like 0.5). "
         "Return STRICT JSON with keys: total_questions (int), per_question (list of {qid: string, correct: bool, score: number, feedback: string, expected: string}), "
         "overall_score (number 0..10). Do not include any extra commentary outside JSON."
     )
 
-    for sub in submissions:
-        if str(sub.get("course_id")) != str(course_id) or str(sub.get("assignment_id")) != str(assignment_id):
-            continue
-        students += 1
-        text = (sub.get("body_text") or "").strip()
-        if not text:
-            path = _first_parsable_attachment(sub.get("attachments") or [])
-            if path:
-                # For HTML files, check for parsed version first
-                if path.lower().endswith('.html'):
-                    parsed_path = os.path.splitext(path)[0] + "_parsed.txt"
-                    if os.path.exists(parsed_path):
-                        t = read_text_from_file(parsed_path)
-                    else:
-                        t = read_text_from_file(path)
-                else:
-                    t = read_text_from_file(path)
-                if t:
-                    text = t
-                    files += 1
-        if not text:
-            out = {
-                "course_id": course_id,
-                "assignment_id": assignment_id,
-                "user_id": sub.get("user_id"),
-                "name": sub.get("name"),
-                "reply": "",
-                "score": None,
-                "error": "no_text",
-            }
-            out_f.write(json.dumps(out, ensure_ascii=False) + "\n")
-            continue
-
-        print(f"[DEBUG] Grading student {sub.get('name')} - submission text length: {len(text)}")
-        try:
-            user_payload = (
-                f"ANSWER_KEY:\n{answer_key_text}\n\n"
-                f"STUDENT_SUBMISSION:\n{text}\n\n"
-                f"GUIDANCE:\n{prompt}"
-            )
-            if backend == "ollama":
-                reply = _call_ollama(ollama_host or "http://localhost:11434", ollama_model or "llama3.1", system_prompt, user_payload)
-            else:
-                # Use model from environment or fallback to gpt-3.5-turbo
-                model = openrouter_model if openrouter_model else "openai/gpt-3.5-turbo"
-                print(f"[DEBUG] Using OpenRouter model: {model}")
-                reply = _call_openrouter(openrouter_api_key or "", model, system_prompt, user_payload)
-        except Exception as e:
-            print(f"[DEBUG] Exception during grading: {str(e)}")
-            reply = ""
-        err = None
-        if not reply:
-            err = "backend_error"
-            errors += 1
-            print(f"[DEBUG] No reply from backend for {sub.get('name')}")
-        # Try to parse JSON response for structured grading
-        per_question = None
-        score = None
-        if reply:
-            print(f"[DEBUG] Reply length: {len(reply)}")
-            try:
-                # Extract first JSON object
-                import re as _re
-                m = _re.search(r"\{[\s\S]*\}", reply)
-                js = reply if reply.strip().startswith("{") else (m.group(0) if m else "")
-                if js:
-                    obj = json.loads(js)
-                    pq = obj.get("per_question")
-                    if isinstance(pq, list):
-                        per_question = pq
-                    elif isinstance(pq, dict):
-                        # normalize to list
-                        per_question = [dict(qid=k, **v) if isinstance(v, dict) else {"qid": k, "score": v} for k, v in pq.items()]
-                    oscore = obj.get("overall_score")
-                    if isinstance(oscore, (int, float)):
-                        score = float(oscore)
-                        print(f"[DEBUG] Parsed score: {score}")
-            except Exception as e:
-                print(f"[DEBUG] Exception parsing JSON: {str(e)}")
-                pass
-        if score is None:
-            score = _parse_numeric_score(reply)
-        rec = {
-            "course_id": course_id,
-            "assignment_id": assignment_id,
-            "user_id": sub.get("user_id"),
-            "name": sub.get("name"),
-            "reply": reply,
-            "score": score,
-            "per_question": per_question,
-            "error": err,
+    # Filter submissions for this assignment
+    assignment_submissions = [
+        sub for sub in submissions 
+        if str(sub.get("course_id")) == str(course_id) and str(sub.get("assignment_id")) == str(assignment_id)
+    ]
+    
+    students = len(assignment_submissions)
+    print(f"[INFO] Starting parallel grading with {num_workers} workers for {students} students")
+    
+    # Collect all results first, then write them to file
+    results = []
+    
+    # Use ThreadPoolExecutor for parallel processing
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Submit all grading tasks
+        future_to_sub = {
+            executor.submit(
+                _grade_single_submission,
+                sub,
+                course_id,
+                assignment_id,
+                answer_key_text,
+                prompt,
+                system_prompt,
+                backend,
+                ollama_host,
+                ollama_model,
+                openrouter_api_key,
+                openrouter_model,
+            ): sub for sub in assignment_submissions
         }
-        out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_sub):
+            sub = future_to_sub[future]
+            try:
+                result, files_read_count = future.result()
+                results.append(result)
+                files += files_read_count
+                if result.get("error"):
+                    errors += 1
+                print(f"[INFO] Completed grading for {result.get('name')} ({len(results)}/{students})")
+            except Exception as exc:
+                print(f"[ERROR] Grading failed for {sub.get('name')}: {exc}")
+                error_result = {
+                    "course_id": course_id,
+                    "assignment_id": assignment_id,
+                    "user_id": sub.get("user_id"),
+                    "name": sub.get("name"),
+                    "reply": f"ERROR: {str(exc)}",
+                    "score": None,
+                    "error": "grading_exception",
+                }
+                results.append(error_result)
+                errors += 1
+    
+    # Write all results to file
+    with open(out_path, "w", encoding="utf-8") as out_f:
+        for rec in results:
+            out_f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-    out_f.close()
     elapsed = round(time.time() - start, 2)
+    print(f"[INFO] Grading completed: {students} students in {elapsed}s ({round(elapsed/students, 2)}s per student)")
+    
     return {
         "students": students,
         "files_read": files,
@@ -322,3 +452,4 @@ def run_grading(
         "backend": backend,
         "out_path": out_path,
     }
+

@@ -9,9 +9,97 @@
 <script>
 async function loadQ(){
   const rows = await (await fetch('/api/stats/questions')).json();
+  
+  // Fetch assignment names from Canvas
+  const courseId = '{{ env.get("CANVAS_COURSE_ID","") }}';
+  let assignmentNames = {};
+  if(courseId) {
+    try {
+      const canvasAssigns = await (await fetch(`/api/canvas/${encodeURIComponent(courseId)}/assignments`)).json();
+      (canvasAssigns || []).forEach(a => {
+        assignmentNames[a.id] = a.name;
+      });
+    } catch(e) {
+      console.error('Error fetching assignments:', e);
+    }
+  }
+  
   const t = document.getElementById('qtable');
-  t.innerHTML = '<tr><th>QID</th><th>Avg</th><th>Median</th><th>Stdev</th></tr>' + rows.map(r=>`<tr><td>${r.qid}</td><td>${r.avg}</td><td>${r.median}</td><td>${r.stdev}</td></tr>`).join('');
-  new Chart(document.getElementById('qbar'), {type:'bar', data:{labels:rows.map(r=>r.qid), datasets:[{label:'Avg', data:rows.map(r=>r.avg||0)}]}});
+  t.innerHTML = '<tr><th>Assignment</th><th>QID</th><th>Avg</th><th>Median</th><th>Stdev</th></tr>' + 
+    rows.map(r=>`<tr><td>${assignmentNames[r.assignment_id] || `Assignment ${r.assignment_id}`}</td><td>${r.qid}</td><td>${r.avg}</td><td>${r.median}</td><td>${r.stdev}</td></tr>`).join('');
+  
+  // Group rows by assignment
+  const assignmentMap = new Map();
+  const assignmentOrder = [];
+  rows.forEach(r => {
+    const assignName = assignmentNames[r.assignment_id] || `Assignment ${r.assignment_id}`;
+    if(!assignmentMap.has(r.assignment_id)) {
+      assignmentMap.set(r.assignment_id, { name: assignName, questions: [] });
+      assignmentOrder.push(r.assignment_id);
+    }
+    assignmentMap.get(r.assignment_id).questions.push(r);
+  });
+  
+  // Generate colors for each assignment
+  const colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E2', '#F8B88B', '#A9DFBF'];
+  
+  // Create labels and datasets for clustered chart
+  const labels = [];
+  const datasets = [];
+  let colorIndex = 0;
+  
+  assignmentOrder.forEach(assignId => {
+    const assignData = assignmentMap.get(assignId);
+    const color = colors[colorIndex % colors.length];
+    
+    // Add labels for this assignment's questions
+    assignData.questions.forEach(q => {
+      labels.push(`${assignData.name}\nQ${q.qid}`);
+    });
+    
+    // Create dataset for this assignment (will have bars for all its questions)
+    // We'll create one dataset per assignment but with data aligned to its questions
+    const dataArray = new Array(labels.length).fill(null);
+    const startIdx = labels.length - assignData.questions.length;
+    assignData.questions.forEach((q, idx) => {
+      dataArray[startIdx + idx] = q.avg || 0;
+    });
+    
+    datasets.push({
+      label: assignData.name,
+      data: dataArray,
+      backgroundColor: color,
+      borderColor: color
+    });
+    
+    colorIndex++;
+  });
+  
+  new Chart(document.getElementById('qbar'), {
+    type:'bar',
+    data: {
+      labels: labels,
+      datasets: datasets
+    },
+    options: {
+      scales: {
+        x: {
+          stacked: false
+        },
+        y: {
+          stacked: false,
+          beginAtZero: true,
+          max: 1
+        }
+      },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'top'
+        }
+      }
+    }
+  });
 }
 loadQ();
 </script>

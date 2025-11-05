@@ -1,0 +1,324 @@
+{% extends 'layout.html' %}
+
+{% block content %}
+
+<div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center align-items-start gap-3">
+  <div>
+    <h3 class="mb-1">Grades Comparison</h3>
+    <div class="text-muted">Compare LLM grades with actual Canvas grades for assignments.</div>
+  </div>
+  <div class="d-flex gap-2 align-items-center">
+    <label class="form-label mb-0 me-2">Module</label>
+    <select class="form-select" id="moduleSelect" style="min-width:180px"><option value="">-- All Assignments --</option></select>
+    <label class="form-label mb-0 me-2">Assignment</label>
+    <select class="form-select" id="assignmentSelect" data-course="{{ env.get('CANVAS_COURSE_ID','') }}" style="min-width:220px"></select>
+  </div>
+</div>
+
+<div class="d-flex flex-wrap gap-2 mt-3">
+  <button class="btn btn-outline-secondary" id="btnRefresh">Refresh Comparison</button>
+  <button class="btn btn-outline-secondary" id="btnExportCSV">Export as CSV</button>
+</div>
+
+<div class="card mt-3">
+  <div class="card-body">
+    <div id="gradeStats" class="row g-3 mb-3">
+      <div class="col-md-2"><div class="card"><div class="card-body">
+        <div class="h6 text-uppercase text-muted">Total Students</div>
+        <div id="statTotal" class="display-6">0</div>
+      </div></div></div>
+      <div class="col-md-2"><div class="card"><div class="card-body">
+        <div class="h6 text-uppercase text-muted">Matches</div>
+        <div id="statMatches" class="display-6 text-success">0</div>
+      </div></div></div>
+      <div class="col-md-2"><div class="card"><div class="card-body">
+        <div class="h6 text-uppercase text-muted">Discrepancies</div>
+        <div id="statDiscrepancies" class="display-6 text-danger">0</div>
+      </div></div></div>
+      <div class="col-md-2"><div class="card"><div class="card-body">
+        <div class="h6 text-uppercase text-muted">Errors</div>
+        <div id="statErrors" class="display-6 text-warning">0</div>
+      </div></div></div>
+      <div class="col-md-2"><div class="card"><div class="card-body">
+        <div class="h6 text-uppercase text-muted">Avg Difference</div>
+        <div id="statAvgDiff" class="display-6">-</div>
+      </div></div></div>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-striped table-hover" id="gradesTable">
+        <thead>
+          <tr>
+            <th>Student</th>
+            <th>Email</th>
+            <th>LLM Score</th>
+            <th>Canvas Score</th>
+            <th>Difference</th>
+            <th>Canvas Grade</th>
+            <th>Status</th>
+            <th>LLM Error</th>
+            <th>Submitted</th>
+          </tr>
+        </thead>
+        <tbody>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+const courseId = document.getElementById('assignmentSelect').dataset.course;
+let currentComparisons = [];
+let allAssignments = [];
+
+async function populateAssignments(){
+  if(!courseId){
+    document.getElementById('assignmentSelect').innerHTML = '<option value="">Set course in Setup</option>';
+    return;
+  }
+  try {
+    const res = await fetch(`/api/canvas/${encodeURIComponent(courseId)}/assignments`);
+    allAssignments = await res.json();
+    filterAssignmentsByModule();
+  } catch (err) {
+    console.error('Error loading assignments:', err);
+  }
+}
+
+function filterAssignmentsByModule(){
+  const moduleId = document.getElementById('moduleSelect').value;
+  const select = document.getElementById('assignmentSelect');
+  select.innerHTML = '';
+  
+  if(!moduleId){
+    // Show all assignments
+    (allAssignments || []).forEach(a => {
+      if (a.published) {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = a.name || `Assignment ${a.id}`;
+        select.appendChild(opt);
+      }
+    });
+  } else {
+    // Fetch module items to filter assignments
+    fetch(`/api/canvas/${encodeURIComponent(courseId)}/modules/${encodeURIComponent(moduleId)}/items`)
+      .then(res => res.json())
+      .then(items => {
+        // Extract assignment IDs from module items
+        const assignmentIds = new Set();
+        (items || []).forEach(item => {
+          if (item.type === 'Assignment' && item.content_id) {
+            assignmentIds.add(item.content_id);
+          }
+        });
+        
+        // Filter and display only assignments in this module
+        (allAssignments || []).forEach(a => {
+          if (a.published && assignmentIds.has(a.id)) {
+            const opt = document.createElement('option');
+            opt.value = a.id;
+            opt.textContent = a.name || `Assignment ${a.id}`;
+            select.appendChild(opt);
+          }
+        });
+        
+        if(select.value){ loadComparison(select.value); }
+      })
+      .catch(err => console.error('Error loading module items:', err));
+  }
+}
+
+async function loadModules(){
+  if(!courseId){
+    return;
+  }
+  try {
+    const res = await fetch(`/api/canvas/${encodeURIComponent(courseId)}/modules`);
+    const modules = await res.json();
+    const select = document.getElementById('moduleSelect');
+    select.innerHTML = '<option value="">-- All Assignments --</option>';
+    (modules || []).forEach(m => {
+      // Only show published modules
+      if (m.published !== false) {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.name || m.id;
+        select.appendChild(opt);
+      }
+    });
+  } catch (err) {
+    console.error('Error loading modules:', err);
+  }
+}
+
+async function loadComparison(assignmentId){
+  if(!assignmentId) return;
+  
+  try {
+    // Get points_possible from the already-loaded allAssignments
+    let pointsPossible = 10;
+    const assignment = (allAssignments || []).find(a => a.id == assignmentId);
+    if (assignment && assignment.points_possible) {
+      pointsPossible = assignment.points_possible;
+    }
+    
+    // Then fetch the comparison data
+    const res = await fetch(`/api/assignment/${encodeURIComponent(assignmentId)}/grade-comparison`);
+    if (!res.ok) {
+      const contentType = res.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        const data = await res.json();
+        throw new Error(data.error || 'Unknown error');
+      } else {
+        throw new Error('Server error: ' + res.statusText);
+      }
+    }
+    
+    const data = await res.json();
+    
+    // Scale the LLM scores to match the assignment's points_possible
+    currentComparisons = (data.comparisons || []).map(c => {
+      let scaledLlmScore = c.llm_score;
+      if (c.llm_score !== null && pointsPossible !== 10) {
+        scaledLlmScore = (c.llm_score / 10) * pointsPossible;
+      }
+      
+      let scaledDifference = c.difference;
+      if (scaledLlmScore !== null && c.canvas_score !== null) {
+        scaledDifference = c.canvas_score - scaledLlmScore;
+      }
+      
+      return {
+        ...c,
+        llm_score: scaledLlmScore,
+        difference: scaledDifference,
+        points_possible: pointsPossible
+      };
+    });
+    
+    renderComparisonTable();
+    updateStatistics();
+  } catch (err) {
+    console.error('Error loading comparison:', err);
+    alert('Error: ' + err.message);
+  }
+}
+
+function renderComparisonTable(){
+  const tbody = document.querySelector('#gradesTable tbody');
+  tbody.innerHTML = '';
+  
+  currentComparisons.forEach(c => {
+    const row = document.createElement('tr');
+    
+    // Determine row color based on match/error
+    if (c.llm_error) {
+      row.className = 'table-danger';
+    } else if (c.difference !== null && Math.abs(c.difference) > 0.01) {
+      row.className = 'table-warning';
+    } else {
+      row.className = 'table-success';
+    }
+    
+    const diffColor = c.difference === null ? '' : (c.difference > 0 ? 'text-success' : 'text-danger');
+    
+    row.innerHTML = `
+      <td><strong>${c.name || 'Unknown'}</strong></td>
+      <td>${c.email ? c.email : (c.user_id || '-')}</td>
+      <td>${c.llm_score !== null ? c.llm_score.toFixed(2) : '<span class="text-muted">-</span>'}</td>
+      <td>${c.canvas_score !== null ? c.canvas_score.toFixed(2) : '<span class="text-muted">-</span>'}</td>
+      <td class="${diffColor}"><strong>${c.difference !== null ? (c.difference > 0 ? '+' : '') + c.difference.toFixed(2) : '-'}</strong></td>
+      <td>${c.canvas_grade || '-'}</td>
+      <td><span class="badge bg-info">${c.workflow_state || 'unknown'}</span></td>
+      <td>${c.llm_error ? `<span class="badge bg-danger" title="${c.llm_error}">Error</span>` : '-'}</td>
+      <td>${c.submitted_at ? new Date(c.submitted_at).toLocaleDateString() : '-'}</td>
+    `;
+    
+    tbody.appendChild(row);
+  });
+}
+
+function updateStatistics(){
+  const matches = currentComparisons.filter(c => 
+    !c.llm_error && c.difference !== null && Math.abs(c.difference) < 0.01
+  ).length;
+  
+  const discrepancies = currentComparisons.filter(c => 
+    !c.llm_error && c.difference !== null && Math.abs(c.difference) >= 0.01
+  ).length;
+  
+  const errors = currentComparisons.filter(c => c.llm_error).length;
+  
+  const diffs = currentComparisons
+    .map(c => c.difference)
+    .filter(d => d !== null);
+  
+  document.getElementById('statTotal').textContent = currentComparisons.length;
+  document.getElementById('statMatches').textContent = matches;
+  document.getElementById('statDiscrepancies').textContent = discrepancies;
+  document.getElementById('statErrors').textContent = errors;
+  
+  if (diffs.length > 0) {
+    const avgDiff = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+    document.getElementById('statAvgDiff').textContent = (avgDiff > 0 ? '+' : '') + avgDiff.toFixed(2);
+  } else {
+    document.getElementById('statAvgDiff').textContent = '-';
+  }
+}
+
+function exportAsCSV(){
+  if (currentComparisons.length === 0) {
+    alert('No comparisons to export');
+    return;
+  }
+  
+  const headers = ['Student', 'Email/ID', 'LLM Score', 'Canvas Score', 'Difference', 'Canvas Grade', 'Status', 'LLM Error', 'Submitted'];
+  const rows = currentComparisons.map(c => [
+    c.name || 'Unknown',
+    c.email ? c.email : (c.user_id || ''),
+    c.llm_score !== null ? c.llm_score : '',
+    c.canvas_score !== null ? c.canvas_score : '',
+    c.difference !== null ? c.difference : '',
+    c.canvas_grade || '',
+    c.workflow_state || '',
+    c.llm_error || '',
+    c.submitted_at ? new Date(c.submitted_at).toLocaleString() : ''
+  ]);
+  
+  const csv = [headers, ...rows]
+    .map(row => row.map(cell => `"${cell}"`).join(','))
+    .join('\n');
+  
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `grade_comparison_${document.getElementById('assignmentSelect').selectedOptions[0].text}_${new Date().toISOString().split('T')[0]}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  window.URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+}
+
+document.getElementById('moduleSelect').addEventListener('change', e => filterAssignmentsByModule());
+
+document.getElementById('assignmentSelect').addEventListener('change', e => {
+  loadComparison(e.target.value);
+});
+
+document.getElementById('btnRefresh').addEventListener('click', () => {
+  const assignmentId = document.getElementById('assignmentSelect').value;
+  if (assignmentId) {
+    loadComparison(assignmentId);
+  }
+});
+
+document.getElementById('btnExportCSV').addEventListener('click', exportAsCSV);
+
+// Initialize
+populateAssignments();
+loadModules();
+</script>
+{% endblock %}

@@ -21,6 +21,21 @@
 
 <script>
 let courseId = '{{ env.CANVAS_COURSE_ID }}';
+let assignmentNames = {};
+
+async function loadAssignmentNames() {
+  try {
+    if(courseId) {
+      const response = await fetch(`/api/canvas/${encodeURIComponent(courseId)}/assignments`);
+      const assignments = await response.json();
+      (assignments || []).forEach(a => {
+        assignmentNames[a.id] = a.name;
+      });
+    }
+  } catch (error) {
+    console.error('Error loading assignment names:', error);
+  }
+}
 
 async function loadStudents() {
   try {
@@ -33,8 +48,14 @@ async function loadStudents() {
       select.remove(1);
     }
     
-    // Add students to dropdown
+    // Add students to dropdown, sorted alphabetically
     if (Array.isArray(students)) {
+      students.sort((a, b) => {
+        const nameA = (a.name || `Student ${a.id}`).toLowerCase();
+        const nameB = (b.name || `Student ${b.id}`).toLowerCase();
+        return nameA.localeCompare(nameB);
+      });
+      
       students.forEach(student => {
         const option = document.createElement('option');
         option.value = student.id;
@@ -49,7 +70,10 @@ async function loadStudents() {
   }
 }
 
-document.addEventListener('DOMContentLoaded', loadStudents);
+document.addEventListener('DOMContentLoaded', async () => {
+  await loadAssignmentNames();
+  loadStudents();
+});
 
 document.getElementById('btnLoad').onclick = async () => {
   const uid = document.getElementById('studentSelect').value.trim();
@@ -57,17 +81,27 @@ document.getElementById('btnLoad').onclick = async () => {
   const rows = await (await fetch(`/api/student/${encodeURIComponent(uid)}/scores`)).json();
   const t = document.getElementById('resTable');
   t.innerHTML = '<tr><th>Assignment</th><th>Score</th><th>Snippet</th><th></th></tr>' +
-    rows.map((r,i)=>`<tr><td>${r.assignment_id}</td><td>${r.score ?? ''}</td><td>${(r.reply||'').slice(0,120)}</td><td><button class="btn btn-sm btn-outline-secondary" onclick="showPQ(${i})">Details</button></td></tr>`).join('');
-  new Chart(document.getElementById('trend'),{type:'line', data:{labels:rows.map(r=>r.assignment_id), datasets:[{label:'Score', data:rows.map(r=>r.score||0)}]}});
+    rows.map((r,i)=>`<tr><td>${assignmentNames[r.assignment_id] || `Assignment ${r.assignment_id}`}</td><td>${r.score ?? ''}</td><td>${(r.reply||'').slice(0,120)}</td><td><button class="btn btn-sm btn-outline-secondary" onclick="showPQ(${i})">Details</button></td></tr>`).join('');
+  new Chart(document.getElementById('trend'),{type:'line', data:{labels:rows.map(r=>assignmentNames[r.assignment_id] || `Assignment ${r.assignment_id}`), datasets:[{label:'Score', data:rows.map(r=>r.score||0)}]}});
   window._rows = rows; if(rows.length) showPQ(0);
 }
+
+function formatQID(qid) {
+  // Ensure consistent Q format (Q1, Q2, etc)
+  const qidStr = String(qid).trim();
+  if(qidStr.toLowerCase().startsWith('q')) {
+    return 'Q' + qidStr.substring(1).toUpperCase();
+  }
+  return 'Q' + qidStr;
+}
+
 function showPQ(i){
   const c = document.getElementById('qDetails');
   const r = (window._rows||[])[i];
   const pq = r && r.per_question || [];
   if(!pq.length){ c.innerHTML = '<div class="alert alert-info">No per-question details available.</div>'; return; }
-  const rows = pq.map(q=>`<tr><td>${q.qid??''}</td><td>${q.score??(q.correct?1:0)}</td><td>${(q.feedback||'').replace(/</g,'&lt;')}</td><td>${(q.expected||'').replace(/</g,'&lt;')}</td></tr>`).join('');
-  c.innerHTML = `<div class="card"><div class="card-body"><h5>Per-question details (Assignment ${r.assignment_id})</h5><table class="table table-sm"><tr><th>QID</th><th>Score</th><th>Feedback</th><th>Expected</th></tr>${rows}</table></div></div>`;
+  const rows = pq.map(q=>`<tr><td>${formatQID(q.qid??'')}</td><td>${q.score??(q.correct?1:0)}</td><td>${(q.feedback||'').replace(/</g,'&lt;')}</td><td>${(q.expected||'').replace(/</g,'&lt;')}</td></tr>`).join('');
+  c.innerHTML = `<div class="card"><div class="card-body"><h5>Per-question details (${assignmentNames[r.assignment_id] || `Assignment ${r.assignment_id}`})</h5><table class="table table-sm"><tr><th>QID</th><th>Score</th><th>Feedback</th><th>Expected</th></tr>${rows}</table></div></div>`;
 }
 </script>
 {% endblock %}
