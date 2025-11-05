@@ -44,7 +44,7 @@ def _first_parsable_attachment(attachments: list) -> Optional[str]:
     for a in attachments:
         path = a.get("saved_path")
         ext = os.path.splitext(path or "")[1].lower()
-        if ext in (".txt", ".pdf", ".docx"):
+        if ext in (".txt", ".pdf", ".docx", ".html"):
             return path
     return None
 
@@ -165,22 +165,50 @@ def run_grading(
         "MANIFEST_FILE": "submissions_manifest.jsonl",
     }
     env = _load_env(defaults)
-    manifest_path = os.path.join(env.get("DATA_DIR", "./data"), env.get("MANIFEST_FILE", "submissions_manifest.jsonl"))
+    # Look for assignment-specific manifest first, then fall back to root manifest
+    data_dir = env.get("DATA_DIR", "./data")
+    manifest_name = env.get("MANIFEST_FILE", "submissions_manifest.jsonl")
+    assignment_manifest = os.path.join(data_dir, "assignments", str(assignment_id), manifest_name)
+    manifest_path = assignment_manifest if os.path.exists(assignment_manifest) else os.path.join(data_dir, manifest_name)
     submissions = _read_jsonl(manifest_path)
     _ensure_dir(out_path)
 
-    out_f = open(out_path, "a", encoding="utf-8")
+    # Clear old results file before grading starts
+    if os.path.exists(out_path):
+        os.remove(out_path)
+
+    out_f = open(out_path, "w", encoding="utf-8")
     files = 0
     students = 0
     errors = 0
 
     # Load answer key text (any file type)
+    # For HTML answer keys, check for pre-parsed version first
     chosen_answer_key_path = answer_key_path
     if not chosen_answer_key_path:
         ak_env = env.get("ANSWER_KEY_FILE")
         if ak_env:
             chosen_answer_key_path = os.path.join(env.get("DATA_DIR", "./data"), ak_env)
-    answer_key_text = _read_file_text(chosen_answer_key_path) if chosen_answer_key_path else ""
+    
+    answer_key_text = ""
+    if chosen_answer_key_path:
+        # If it's an HTML file, check for pre-parsed version
+        if chosen_answer_key_path.lower().endswith('.html'):
+            # For answerkey subfolder structure
+            if "answerkey" in chosen_answer_key_path:
+                parsed_path = os.path.join(os.path.dirname(chosen_answer_key_path), "answer_key_parsed.txt")
+            else:
+                parsed_path = os.path.splitext(chosen_answer_key_path)[0] + "_parsed.txt"
+            
+            if os.path.exists(parsed_path):
+                answer_key_text = _read_file_text(parsed_path)
+            else:
+                answer_key_text = _read_file_text(chosen_answer_key_path)
+        else:
+            answer_key_text = _read_file_text(chosen_answer_key_path)
+    
+    print(f"[DEBUG] Answer key path: {chosen_answer_key_path}")
+    print(f"[DEBUG] Answer key text length: {len(answer_key_text)}")
 
     # System prompt designed for per-question analysis and JSON output
     system_prompt = (
@@ -198,7 +226,15 @@ def run_grading(
         if not text:
             path = _first_parsable_attachment(sub.get("attachments") or [])
             if path:
-                t = read_text_from_file(path)
+                # For HTML files, check for parsed version first
+                if path.lower().endswith('.html'):
+                    parsed_path = os.path.splitext(path)[0] + "_parsed.txt"
+                    if os.path.exists(parsed_path):
+                        t = read_text_from_file(parsed_path)
+                    else:
+                        t = read_text_from_file(path)
+                else:
+                    t = read_text_from_file(path)
                 if t:
                     text = t
                     files += 1
@@ -215,6 +251,7 @@ def run_grading(
             out_f.write(json.dumps(out, ensure_ascii=False) + "\n")
             continue
 
+        print(f"[DEBUG] Grading student {sub.get('name')} - submission text length: {len(text)}")
         try:
             user_payload = (
                 f"ANSWER_KEY:\n{answer_key_text}\n\n"
@@ -224,17 +261,23 @@ def run_grading(
             if backend == "ollama":
                 reply = _call_ollama(ollama_host or "http://localhost:11434", ollama_model or "llama3.1", system_prompt, user_payload)
             else:
-                reply = _call_openrouter(openrouter_api_key or "", openrouter_model or "meta-llama/llama-3.1-8b-instruct:free", system_prompt, user_payload)
-        except Exception:
+                # Use model from environment or fallback to gpt-3.5-turbo
+                model = openrouter_model if openrouter_model else "openai/gpt-3.5-turbo"
+                print(f"[DEBUG] Using OpenRouter model: {model}")
+                reply = _call_openrouter(openrouter_api_key or "", model, system_prompt, user_payload)
+        except Exception as e:
+            print(f"[DEBUG] Exception during grading: {str(e)}")
             reply = ""
         err = None
         if not reply:
             err = "backend_error"
             errors += 1
+            print(f"[DEBUG] No reply from backend for {sub.get('name')}")
         # Try to parse JSON response for structured grading
         per_question = None
         score = None
         if reply:
+            print(f"[DEBUG] Reply length: {len(reply)}")
             try:
                 # Extract first JSON object
                 import re as _re
@@ -251,7 +294,9 @@ def run_grading(
                     oscore = obj.get("overall_score")
                     if isinstance(oscore, (int, float)):
                         score = float(oscore)
-            except Exception:
+                        print(f"[DEBUG] Parsed score: {score}")
+            except Exception as e:
+                print(f"[DEBUG] Exception parsing JSON: {str(e)}")
                 pass
         if score is None:
             score = _parse_numeric_score(reply)

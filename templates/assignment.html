@@ -50,14 +50,7 @@
       <div class="modal-header"><h5 class="modal-title">Run Grading</h5></div>
       <div class="modal-body">
         <div class="row g-3">
-          <div class="col-md-4">
-            <label class="form-label">Backend</label>
-            <select class="form-select" id="backend">
-              <option value="ollama">Ollama</option>
-              <option value="openrouter">OpenRouter</option>
-            </select>
-          </div>
-          <div class="col-md-8">
+          <div class="col-12">
             <label class="form-label">Prompt</label>
             <textarea class="form-control" rows="5" id="prompt">Give concise feedback and a score /10.</textarea>
           </div>
@@ -160,14 +153,13 @@ async function loadAssignmentData(aid){
 document.getElementById('assignmentSelect').addEventListener('change', e => loadAssignmentData(e.target.value));
 
 document.getElementById('btnRun').onclick = async () => {
-  const backend = document.getElementById('backend').value;
   const prompt = document.getElementById('prompt').value;
   const assignmentId = document.getElementById('assignmentSelect').value;
   if(!assignmentId){ alert('Select an assignment first.'); return; }
   const btn = document.getElementById('btnRun');
   btn.disabled = true; btn.textContent = 'Running...';
   try{
-    const res = await fetch('/api/grade', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({backend, prompt, assignment_id: assignmentId})});
+    const res = await fetch('/api/grade', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({backend: 'openrouter', prompt, assignment_id: assignmentId})});
     const data = await res.json();
     if(!res.ok){ throw new Error(data.error || 'Error'); }
     alert('Grading complete. Processed ' + (data.students || 0) + ' students.');
