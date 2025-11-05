@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 {% extends "layout.html" %}
 {% block content %}
 <h2>Questions Analysis</h2>
@@ -476,3 +477,24 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 {% endblock %}
+=======
+{% extends 'layout.html' %}
+{% block content %}
+<h3>Questions</h3>
+<div class="card"><div class="card-body">
+  <canvas id="qbar" height="120"></canvas>
+</div></div>
+<table class="table table-sm mt-3" id="qtable"></table>
+
+<script>
+async function loadQ(){
+  const rows = await (await fetch('/api/stats/questions')).json();
+  const t = document.getElementById('qtable');
+  t.innerHTML = '<tr><th>QID</th><th>Avg</th><th>Median</th><th>Stdev</th></tr>' + rows.map(r=>`<tr><td>${r.qid}</td><td>${r.avg}</td><td>${r.median}</td><td>${r.stdev}</td></tr>`).join('');
+  new Chart(document.getElementById('qbar'), {type:'bar', data:{labels:rows.map(r=>r.qid), datasets:[{label:'Avg', data:rows.map(r=>r.avg||0)}]}});
+}
+loadQ();
+</script>
+{% endblock %}
+
+>>>>>>> origin/Chase

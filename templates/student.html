@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 {% extends "layout.html" %}
 {% block content %}
 <h2>Student Grades</h2>
@@ -273,5 +274,78 @@ document.addEventListener('DOMContentLoaded', function() {
   loadCoursesAndAssignments();
   loadStudents();
 });
+=======
+{% extends 'layout.html' %}
+{% block content %}
+<h3>Students</h3>
+<div class="row g-3">
+  <div class="col-md-4">
+    <select class="form-select" id="studentSelect">
+      <option value="">-- Select a student --</option>
+    </select>
+  </div>
+  <div class="col-md-2">
+    <button class="btn btn-outline-primary" id="btnLoad">Load</button>
+  </div>
+</div>
+
+<div class="card mt-3"><div class="card-body">
+  <canvas id="trend" height="120"></canvas>
+</div></div>
+
+<table class="table table-sm mt-3" id="resTable"></table>
+<div id="qDetails" class="mt-3"></div>
+
+<script>
+let courseId = '{{ env.CANVAS_COURSE_ID }}';
+
+async function loadStudents() {
+  try {
+    const response = await fetch(`/api/canvas/${courseId}/students`);
+    const students = await response.json();
+    const select = document.getElementById('studentSelect');
+    
+    // Clear existing options except the default
+    while (select.options.length > 1) {
+      select.remove(1);
+    }
+    
+    // Add students to dropdown
+    if (Array.isArray(students)) {
+      students.forEach(student => {
+        const option = document.createElement('option');
+        option.value = student.id;
+        option.textContent = student.name || `Student ${student.id}`;
+        select.appendChild(option);
+      });
+    }
+  } catch (error) {
+    console.error('Error loading students:', error);
+    const select = document.getElementById('studentSelect');
+    select.innerHTML += '<option value="">-- Error loading students --</option>';
+  }
+}
+
+document.addEventListener('DOMContentLoaded', loadStudents);
+
+document.getElementById('btnLoad').onclick = async () => {
+  const uid = document.getElementById('studentSelect').value.trim();
+  if(!uid) return;
+  const rows = await (await fetch(`/api/student/${encodeURIComponent(uid)}/scores`)).json();
+  const t = document.getElementById('resTable');
+  t.innerHTML = '<tr><th>Assignment</th><th>Score</th><th>Snippet</th><th></th></tr>' +
+    rows.map((r,i)=>`<tr><td>${r.assignment_id}</td><td>${r.score ?? ''}</td><td>${(r.reply||'').slice(0,120)}</td><td><button class="btn btn-sm btn-outline-secondary" onclick="showPQ(${i})">Details</button></td></tr>`).join('');
+  new Chart(document.getElementById('trend'),{type:'line', data:{labels:rows.map(r=>r.assignment_id), datasets:[{label:'Score', data:rows.map(r=>r.score||0)}]}});
+  window._rows = rows; if(rows.length) showPQ(0);
+}
+function showPQ(i){
+  const c = document.getElementById('qDetails');
+  const r = (window._rows||[])[i];
+  const pq = r && r.per_question || [];
+  if(!pq.length){ c.innerHTML = '<div class="alert alert-info">No per-question details available.</div>'; return; }
+  const rows = pq.map(q=>`<tr><td>${q.qid??''}</td><td>${q.score??(q.correct?1:0)}</td><td>${(q.feedback||'').replace(/</g,'&lt;')}</td><td>${(q.expected||'').replace(/</g,'&lt;')}</td></tr>`).join('');
+  c.innerHTML = `<div class="card"><div class="card-body"><h5>Per-question details (Assignment ${r.assignment_id})</h5><table class="table table-sm"><tr><th>QID</th><th>Score</th><th>Feedback</th><th>Expected</th></tr>${rows}</table></div></div>`;
+}
+>>>>>>> origin/Chase
 </script>
 {% endblock %}

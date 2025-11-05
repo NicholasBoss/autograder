@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 {% extends "layout.html" %}
 {% block content %}
 <div class="container mt-4">
@@ -44,13 +45,81 @@
     <button type="submit" class="btn btn-primary">Save Settings</button>
   </form>
 </div>
+=======
+{% extends 'layout.html' %}
+{% block content %}
+<h2>Setup Wizard</h2>
+<form method="post" id="setupForm">
+  <div class="row g-3">
+    <div class="col-md-6">
+      <label class="form-label">CANVAS_API_URL</label>
+      <input class="form-control" name="CANVAS_API_URL" id="CANVAS_API_URL" value="{{ env.get('CANVAS_API_URL','') }}" />
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">CANVAS_API_TOKEN</label>
+      <input class="form-control" type="password" name="CANVAS_API_TOKEN" id="CANVAS_API_TOKEN" value="{{ env.get('CANVAS_API_TOKEN','') }}" />
+      <div class="form-text">
+        <button type="button" class="btn btn-sm btn-outline-secondary mt-2" id="btnValidate">Validate Token</button>
+        <span id="validateStatus" class="ms-2"></span>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Course</label>
+      <select class="form-select" id="courseSelect" name="CANVAS_COURSE_ID"></select>
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Module</label>
+      <select class="form-select" id="moduleSelect"></select>
+    </div>
+
+    <div class="col-md-6">
+      <label class="form-label">Assignment</label>
+      <select class="form-select" id="assignmentSelect" name="CANVAS_ASSIGNMENT_ID"></select>
+    </div>
+
+    <div class="col-md-6">
+      <label class="form-label">DATA_DIR</label>
+      <input class="form-control" name="DATA_DIR" value="{{ env.get('DATA_DIR','') }}" />
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">CANVAS_DOWNLOAD_DIR</label>
+      <input class="form-control" name="CANVAS_DOWNLOAD_DIR" value="{{ env.get('CANVAS_DOWNLOAD_DIR','') }}" />
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">MANIFEST_FILE</label>
+      <input class="form-control" name="MANIFEST_FILE" value="{{ env.get('MANIFEST_FILE','') }}" />
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">RESULTS_FILE</label>
+      <input class="form-control" name="RESULTS_FILE" value="{{ env.get('RESULTS_FILE','') }}" />
+    </div>
+
+
+    <div class="col-md-6">
+      <label class="form-label">OPENROUTER_API_KEY</label>
+      <input class="form-control" type="password" name="OPENROUTER_API_KEY" value="{{ env.get('OPENROUTER_API_KEY','') }}" />
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">OPENROUTER_MODEL</label>
+      <input class="form-control" name="OPENROUTER_MODEL" value="{{ env.get('OPENROUTER_MODEL','') }}" />
+    </div>
+  </div>
+  <div class="mt-4">
+    <button class="btn btn-primary" type="submit">Save</button>
+  </div>
+</form>
+>>>>>>> origin/Chase
 
 <script>
 async function validateToken() {
   const api_url = document.getElementById('CANVAS_API_URL').value;
   const token = document.getElementById('CANVAS_API_TOKEN').value;
+<<<<<<< HEAD
   const canvas_url = `${api_url.replace(/\/+$/, '')}/api/v1`;
   const res = await fetch(`/api/canvas/validate?api_url=${encodeURIComponent(canvas_url)}&token=${encodeURIComponent(token)}`);
+=======
+  const res = await fetch(`/api/canvas/validate?api_url=${encodeURIComponent(api_url)}&token=${encodeURIComponent(token)}`);
+>>>>>>> origin/Chase
   const data = await res.json();
   const s = document.getElementById('validateStatus');
   if (data.ok) { s.textContent = `Hello, ${data.user && (data.user.name || data.user.short_name)}`; s.className='text-success'; }
@@ -61,19 +130,28 @@ document.getElementById('btnValidate').addEventListener('click', validateToken);
 async function loadCourses() {
   const api_url = document.getElementById('CANVAS_API_URL').value;
   const token = document.getElementById('CANVAS_API_TOKEN').value;
+<<<<<<< HEAD
   const canvas_url = `${api_url.replace(/\/+$/, '')}/api/v1`;
   const res = await fetch(`/api/canvas/courses?api_url=${encodeURIComponent(canvas_url)}&token=${encodeURIComponent(token)}`);
+=======
+  const res = await fetch(`/api/canvas/courses?api_url=${encodeURIComponent(api_url)}&token=${encodeURIComponent(token)}`);
+>>>>>>> origin/Chase
   const courses = await res.json();
   const sel = document.getElementById('courseSelect');
   sel.innerHTML = '';
   (courses || []).forEach(c => {
     const opt = document.createElement('option');
     opt.value = c.id; opt.textContent = c.name || c.course_code || c.id;
+<<<<<<< HEAD
     if (String(c.id) === '{{ config.get("CANVAS_COURSE_ID","") }}') opt.selected = true;
+=======
+    if (String(c.id) === '{{ env.get("CANVAS_COURSE_ID","") }}') opt.selected = true;
+>>>>>>> origin/Chase
     sel.appendChild(opt);
   });
   if (sel.value) await loadAssignments();
 }
+<<<<<<< HEAD
 async function loadAssignments() {
   const api_url = document.getElementById('CANVAS_API_URL').value;
   const token = document.getElementById('CANVAS_API_TOKEN').value;
@@ -142,3 +220,55 @@ document.getElementById('fileUploadsOnly').addEventListener('change', function()
 loadCourses();
 </script>
 {% endblock %}
+=======
+async function loadModules() {
+  const api_url = document.getElementById('CANVAS_API_URL').value;
+  const token = document.getElementById('CANVAS_API_TOKEN').value;
+  const cid = document.getElementById('courseSelect').value;
+  if (!cid) return;
+  const res = await fetch(`/api/canvas/${cid}/modules?api_url=${encodeURIComponent(api_url)}&token=${encodeURIComponent(token)}`);
+  const modules = await res.json();
+  const sel = document.getElementById('moduleSelect');
+  sel.innerHTML = '<option value="">-- All Assignments --</option>';
+  (modules || []).forEach(m => {
+    // Only show published modules
+    if (m.published !== false) {
+      const opt = document.createElement('option');
+      opt.value = m.id; opt.textContent = m.name || m.id;
+      sel.appendChild(opt);
+    }
+  });
+}
+async function loadAssignments() {
+  const api_url = document.getElementById('CANVAS_API_URL').value;
+  const token = document.getElementById('CANVAS_API_TOKEN').value;
+  const cid = document.getElementById('courseSelect').value;
+  if (!cid) return;
+  const res = await fetch(`/api/canvas/${cid}/assignments?api_url=${encodeURIComponent(api_url)}&token=${encodeURIComponent(token)}`);
+  const assigns = await res.json();
+  const sel = document.getElementById('assignmentSelect');
+  sel.innerHTML = '';
+  (assigns || []).forEach(a => {
+    // Only show published assignments
+    if (a.published) {
+      const opt = document.createElement('option');
+      opt.value = a.id; opt.textContent = a.name || a.id;
+      if (String(a.id) === '{{ env.get("CANVAS_ASSIGNMENT_ID","") }}') opt.selected = true;
+      sel.appendChild(opt);
+    }
+  });
+}
+document.getElementById('courseSelect').addEventListener('change', () => {
+  loadModules();
+  loadAssignments();
+});
+document.getElementById('moduleSelect').addEventListener('change', loadAssignments);
+async function init() {
+  await loadCourses();
+  await loadModules();
+}
+init();
+</script>
+{% endblock %}
+
+>>>>>>> origin/Chase

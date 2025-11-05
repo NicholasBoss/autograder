@@ -1,1 +1,9 @@
+<<<<<<< HEAD
 {}
+=======
+{
+  "questions": [
+    {"id": "1", "rubric": "Key ideas.", "keywords": ["define", "explain"], "max_score": 10}
+  ]
+}
+>>>>>>> origin/Chase

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 {% extends "layout.html" %}
 {% block content %}
 <h2>Assignments</h2>
@@ -27,12 +28,76 @@
       <div class="modal-footer">
         <button id="startGradeBtn" class="btn btn-primary">Start</button>
         <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+=======
+{% extends 'layout.html' %}
+{% block content %}
+<div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center align-items-start gap-3">
+  <div>
+    <h3 class="mb-1">Assignments</h3>
+    <div class="text-muted">Select an assignment to sync submissions, upload an answer key, and run grading.</div>
+  </div>
+  <div class="d-flex gap-2 align-items-center">
+    <label class="form-label mb-0 me-2">Module</label>
+    <select class="form-select" id="moduleSelect" style="min-width:180px"><option value="">-- All Assignments --</option></select>
+    <label class="form-label mb-0 me-2">Assignment</label>
+    <select class="form-select" id="assignmentSelect" data-course="{{ env.get('CANVAS_COURSE_ID','') }}" style="min-width:220px"></select>
+  </div>
+</div>
+
+<div class="d-flex flex-wrap gap-2 mt-3">
+  <button class="btn btn-outline-secondary" id="btnDownload">Download Submissions</button>
+  <button class="btn btn-outline-secondary" id="btnUpload">Upload Answer Key</button>
+  <button class="btn btn-outline-secondary" id="btnParseQuestions">Parse Questions</button>
+  <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#gradeModal">Grade Now</button>
+</div>
+
+<input type="file" id="answerKeyInput" accept="*/*" class="d-none" />
+
+<div class="row g-3 mt-3" id="summaryCards">
+  <div class="col-md-4"><div class="card"><div class="card-body">
+    <div class="h6 text-uppercase text-muted">Submissions</div>
+    <div id="cardSubmissions" class="display-6">0</div>
+  </div></div></div>
+  <div class="col-md-4"><div class="card"><div class="card-body">
+    <div class="h6 text-uppercase text-muted">Avg Score</div>
+    <div id="cardAvg" class="display-6">-</div>
+  </div></div></div>
+  <div class="col-md-4"><div class="card"><div class="card-body">
+    <div class="h6 text-uppercase text-muted">Answer Key</div>
+    <div id="cardAnswerKey" class="display-6">No</div>
+  </div></div></div>
+</div>
+
+<div class="card mt-3"><div class="card-body">
+  <canvas id="hist" height="120"></canvas>
+</div></div>
+
+<table class="table table-sm mt-3" id="assignTable"></table>
+
+<!-- Grade Modal -->
+<div class="modal" id="gradeModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header"><h5 class="modal-title">Run Grading</h5></div>
+      <div class="modal-body">
+        <div class="row g-3">
+          <div class="col-12">
+            <label class="form-label">Prompt</label>
+            <textarea class="form-control" rows="5" id="prompt">Give concise feedback and a score /10.</textarea>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        <button class="btn btn-primary" id="btnRun">Run</button>
+>>>>>>> origin/Chase
       </div>
     </div>
   </div>
 </div>
 
 <script>
+<<<<<<< HEAD
 async function loadAssignments() {
   const res = await fetch('/api/results');
   const rows = await res.json();
@@ -78,5 +143,160 @@ document.getElementById('startGradeBtn').addEventListener('click', async () => {
 });
 
 loadAssignments();
+=======
+const courseId = document.getElementById('assignmentSelect').dataset.course;
+let histChart;
+let localAssignments = [];
+
+async function fetchLocalAssignments(){
+  localAssignments = await (await fetch('/api/local/assignments')).json();
+}
+
+async function populateAssignments(){
+  await fetchLocalAssignments();
+  if(!courseId){
+    document.getElementById('assignmentSelect').innerHTML = '<option value="">Set course in Setup</option>';
+    return;
+  }
+  const res = await fetch(`/api/canvas/${encodeURIComponent(courseId)}/assignments`);
+  const assigns = await res.json();
+  const select = document.getElementById('assignmentSelect');
+  select.innerHTML = '';
+  const stored = '{{ env.get("CANVAS_ASSIGNMENT_ID","") }}';
+  (assigns || []).forEach(a => {
+    // Only show published assignments
+    if (a.published) {
+      const opt = document.createElement('option');
+      opt.value = a.id;
+      opt.textContent = a.name || `Assignment ${a.id}`;
+      if (String(a.id) === stored) opt.selected = true;
+      select.appendChild(opt);
+    }
+  });
+  if(select.value){ loadAssignmentData(select.value); }
+}
+
+async function loadModules(){
+  if(!courseId){
+    return;
+  }
+  const res = await fetch(`/api/canvas/${encodeURIComponent(courseId)}/modules`);
+  const modules = await res.json();
+  const select = document.getElementById('moduleSelect');
+  select.innerHTML = '<option value="">-- All Assignments --</option>';
+  (modules || []).forEach(m => {
+    // Only show published modules
+    if (m.published !== false) {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.name || m.id;
+      select.appendChild(opt);
+    }
+  });
+}
+
+function assignmentLocalInfo(aid){
+  return localAssignments.find(x => String(x.assignment_id) === String(aid));
+}
+
+async function loadAssignmentData(aid){
+  if(!aid) return;
+  await fetchLocalAssignments();
+  const info = assignmentLocalInfo(aid);
+  document.getElementById('cardAnswerKey').textContent = info && info.answer_key_path ? 'Yes' : 'No';
+  
+  // Get submission count from manifest
+  const submissionCountRes = await fetch(`/api/assignment/${encodeURIComponent(aid)}/submissions-count`);
+  const submissionCountData = await submissionCountRes.json();
+  const submissionCount = submissionCountData.count || 0;
+  
+  const res = await fetch(`/api/assignment/${encodeURIComponent(aid)}/scores`);
+  const rows = await res.json();
+  const t = document.getElementById('assignTable');
+  t.innerHTML = '<tr><th>Student</th><th>Score</th><th>Feedback</th></tr>' +
+    rows.map(r => `<tr><td>${r.name || r.user_id}</td><td>${r.score ?? ''}</td><td>${(r.reply || '').slice(0,160)}</td></tr>`).join('');
+  const scores = rows.map(r => typeof r.score === 'number' ? r.score : null).filter(x => x !== null);
+  
+  // Show submission count (from manifest)
+  document.getElementById('cardSubmissions').textContent = submissionCount;
+  document.getElementById('cardAvg').textContent = scores.length ? (scores.reduce((a,b)=>a+b,0)/scores.length).toFixed(2) : '-';
+  const histCtx = document.getElementById('hist');
+  if(histChart){ histChart.destroy(); }
+  histChart = new Chart(histCtx, {
+    type:'bar',
+    data:{ labels: rows.map(r => r.name || r.user_id), datasets:[{label:'Score', data: rows.map(r => r.score || 0), backgroundColor:'#39B596'}]},
+    options:{scales:{y:{beginAtZero:true,max:10}}}
+  });
+}
+
+document.getElementById('assignmentSelect').addEventListener('change', e => loadAssignmentData(e.target.value));
+
+document.getElementById('btnRun').onclick = async () => {
+  const prompt = document.getElementById('prompt').value;
+  const assignmentId = document.getElementById('assignmentSelect').value;
+  if(!assignmentId){ alert('Select an assignment first.'); return; }
+  const btn = document.getElementById('btnRun');
+  btn.disabled = true; btn.textContent = 'Running...';
+  try{
+    const res = await fetch('/api/grade', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({backend: 'openrouter', prompt, assignment_id: assignmentId})});
+    const data = await res.json();
+    if(!res.ok){ throw new Error(data.error || 'Error'); }
+    alert('Grading complete. Processed ' + (data.students || 0) + ' students.');
+    loadAssignmentData(assignmentId);
+  } catch(err){ alert(err.message || err); }
+  finally { btn.disabled=false; btn.textContent='Run'; }
+}
+
+document.getElementById('btnDownload').onclick = async () => {
+  const assignmentId = document.getElementById('assignmentSelect').value;
+  if(!assignmentId){ alert('Select an assignment first.'); return; }
+  const btn = document.getElementById('btnDownload');
+  btn.disabled = true; btn.textContent = 'Downloading...';
+  try{
+    const res = await fetch(`/api/assignment/${encodeURIComponent(assignmentId)}/download`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({})});
+    const data = await res.json();
+    if(!res.ok){ throw new Error(data.error || 'Download failed'); }
+    alert(`Downloaded ${data.files_downloaded || 0} files for ${data.students || 0} submissions.`);
+    loadAssignmentData(assignmentId);
+  } catch(err){ alert(err.message || err); }
+  finally { btn.disabled=false; btn.textContent='Download Submissions'; }
+}
+
+document.getElementById('btnUpload').onclick = () => {
+  document.getElementById('answerKeyInput').click();
+};
+
+document.getElementById('btnParseQuestions').onclick = async () => {
+  const assignmentId = document.getElementById('assignmentSelect').value;
+  if(!assignmentId){ alert('Select an assignment first.'); return; }
+  const btn = document.getElementById('btnParseQuestions');
+  btn.disabled = true; btn.textContent = 'Parsing...';
+  try{
+    const res = await fetch(`/api/assignment/${encodeURIComponent(assignmentId)}/parse-questions`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({})});
+    const data = await res.json();
+    if(!res.ok){ throw new Error(data.error || 'Parse failed'); }
+    alert('Questions parsed and saved to questions folder.');
+    loadAssignmentData(assignmentId);
+  } catch(err){ alert(err.message || err); }
+  finally { btn.disabled=false; btn.textContent='Parse Questions'; }
+}
+
+document.getElementById('answerKeyInput').addEventListener('change', async (ev) => {
+  const file = ev.target.files[0];
+  if(!file) return;
+  const assignmentId = document.getElementById('assignmentSelect').value;
+  if(!assignmentId){ alert('Select an assignment first.'); return; }
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`/api/assignment/${encodeURIComponent(assignmentId)}/answer-key`, {method:'POST', body: form});
+  const data = await res.json();
+  if(!res.ok){ alert(data.error || 'Upload failed'); }
+  else { alert('Answer key uploaded.'); loadAssignmentData(assignmentId); }
+  ev.target.value = '';
+});
+
+populateAssignments();
+loadModules();
+>>>>>>> origin/Chase
 </script>
 {% endblock %}

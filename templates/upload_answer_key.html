@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 {% extends "layout.html" %}
 {% block content %}
 <h2>Upload Answer Key</h2>
@@ -633,4 +634,17 @@ async function parseQuestionsWithCourse(courseId, assignmentId, filename) {
   <p class="mb-0">Upload answer keys for specific assignments using the form above.</p>
 </div>
 {% endif %}
+=======
+{% extends 'layout.html' %}
+{% block content %}
+<h3>Upload Answer Key</h3>
+<form method="post" enctype="multipart/form-data">
+  <div class="mb-3">
+    <input class="form-control" type="file" name="file" accept="*/*" required />
+  </div>
+  <button class="btn btn-primary">Upload</button>
+  <a class="btn btn-secondary" href="/">Back</a>
+{% if message %}<div class="alert alert-success mt-3">{{ message }}</div>{% endif %}
+</form>
+>>>>>>> origin/Chase
 {% endblock %}

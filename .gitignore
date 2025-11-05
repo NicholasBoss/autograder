@@ -1,5 +1,12 @@
 .env
 .venv
+<<<<<<< HEAD
 __pycache__/
 data/downloads/
 static/temp.css
+=======
+.env
+__pycache__/
+/data/assignments
+/data/downloads
+>>>>>>> origin/Chase
